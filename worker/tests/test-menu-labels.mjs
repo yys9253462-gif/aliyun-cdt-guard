@@ -34,14 +34,15 @@ check('实例按钮前缀含 U+1F5A5', M.DEVICE_PREFIX.includes('\u{1F5A5}'));
 check('暂停标记含 U+23F8', M.PAUSED_MARK.includes('\u{23F8}'));
 
 // ---------------------------------------------------------------------------
-console.log('--- 2. 一级菜单 13 项 ---');
+console.log('--- 2. 一级菜单 14 项 ---');
 const mainLabels = [
   M.LBL_OVERVIEW, M.LBL_TRAFFIC, M.LBL_STATUS, M.LBL_REPORT,
   M.LBL_WEEKLY, M.LBL_BALANCE, M.LBL_ACCOUNTS, M.LBL_START_ALL,
-  M.LBL_STOP_ALL, M.LBL_DEVICES, M.LBL_RUN, M.LBL_HELP, M.LBL_HIDE,
+  M.LBL_STOP_ALL, M.LBL_DEVICES, M.LBL_ADD_ACCOUNT, M.LBL_RUN,
+  M.LBL_HELP, M.LBL_HIDE,
 ];
 console.log(`  一级菜单项数: ${mainLabels.length}`);
-check('项数为 13', mainLabels.length === 13);
+check('项数为 14', mainLabels.length === 14);
 
 const uniq = new Set(mainLabels);
 check('无重复', uniq.size === mainLabels.length,
@@ -115,11 +116,30 @@ for (const l of mainLabels) {
     check(`匹配「${l}」`, false, `带图标=${okIcon} 纯文字=${okPlain}`);
   }
 }
-check('全部 13 项：带图标 / 纯文字 都能匹配',
+check('全部 14 项：带图标 / 纯文字 都能匹配',
   mainLabels.every((l) => M.matchMain(l, l) && M.matchMain(M.stripIcon(l), l)));
 
 check('乱输入不误匹配', !M.matchMain('随便打点什么', M.LBL_OVERVIEW));
 check('空字符串不误匹配', !M.matchMain('', M.LBL_OVERVIEW));
+
+// ---------------------------------------------------------------------------
+console.log('--- 4b. 「添加账号」流程按钮 ---');
+// 这三个按钮是加账号流程里用的，它们也必须能「带图标 / 纯文字」两种都认，
+// 否则用户手打「取消添加」时流程会卡住。
+const addFlowLabels = [
+  M.LBL_ADD_ACCOUNT, M.LBL_ADD_CONFIRM, M.LBL_ADD_RESCAN, M.LBL_ADD_CANCEL,
+];
+for (const l of addFlowLabels) {
+  check(`流程按钮有图标: ${JSON.stringify(M.stripIcon(l))}`,
+    l.codePointAt(0) >= 0x2000);
+}
+check('流程按钮全部可匹配',
+  addFlowLabels.every((l) => M.matchMain(l, l) && M.matchMain(M.stripIcon(l), l)));
+check('流程按钮不含英文字母',
+  addFlowLabels.every((l) => !/[A-Za-z]/.test(M.stripIcon(l))));
+check('「取消添加」和「收起菜单」不混淆',
+  !M.matchMain(M.LBL_ADD_CANCEL, M.LBL_HIDE)
+    && !M.matchMain(M.LBL_HIDE, M.LBL_ADD_CANCEL));
 
 // ---------------------------------------------------------------------------
 console.log('--- 5. stripIcon 边界 ---');

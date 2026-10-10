@@ -28,6 +28,10 @@ import {
   buildReport,
   statusChinese,
 } from './views.js';
+import {
+  startAddAccount,
+  handleAddAccountStep,
+} from './add-account.js';
 
 // ---------------------------------------------------------------------------
 // 权限校验
@@ -51,8 +55,7 @@ export function isAuthorized(config, chatId) {
  * 布局刻意做成两列 —— 整齐的方格观感，而且两列宽度比三列更宽松，
  * 中文按钮不会挤在一起换行。
  *
- * 13 项排成 7 行（最后一行 1 个）。
- * 「收起菜单」单独放最后一行一格，是避免你手滑点到它。
+ * 14 项：前 7 行每行 2 个，最后「收起菜单」单独占一行（避免手滑点到）。
  */
 export function mainMenuRows() {
   return [
@@ -60,8 +63,9 @@ export function mainMenuRows() {
     [L.LBL_STATUS, L.LBL_REPORT],
     [L.LBL_WEEKLY, L.LBL_BALANCE],
     [L.LBL_ACCOUNTS, L.LBL_DEVICES],
+    [L.LBL_ADD_ACCOUNT, L.LBL_RUN],
     [L.LBL_START_ALL, L.LBL_STOP_ALL],
-    [L.LBL_RUN, L.LBL_HELP],
+    [L.LBL_HELP],
     [L.LBL_HIDE],
   ];
 }
@@ -232,7 +236,16 @@ export const HELP_TEXT = `CDT 流量守护 · 使用说明
 /weekly   查看最近 7 天流量周报
 /report   立即发送完整报表
 /run      立即执行一次巡检
+/cancel   取消正在进行的操作（比如添加账号）
 /help     显示本条说明
+
+添加阿里云账号（在手机里就能做）
+点菜单里的「添加账号」，然后按提示走：
+  1. 把新账号的 AccessKey ID 发给我
+  2. 把 AccessKey Secret 发给我（我会立刻删掉那条消息）
+  3. 我自动扫出这个账号下的所有机器，列给你看
+  4. 点「全部加入监控」—— 自动配好，不用碰电脑
+原则：只新增，绝不动你已有的机器配置。
 
 关于「账号汇总」
 免费额度是按账号算的，一个账号下多台机器共享一份额度。
@@ -328,6 +341,18 @@ export async function handleCommand(env, config, token, chatId, text) {
       await tg.sendText(token, chatId, HELP_TEXT);
       return;
 
+    case 'cancel':
+      // 取消正在进行的多步流程（目前只有「添加账号」）
+      // 注意：/cancel 是命令（以 / 开头），走的是 handleCommand 这条路，
+      // 而流程的文字处理在 handlePlainText 里，所以这里必须单独接一下。
+      if (await common.getWizard(env, chatId)) {
+        await common.clearWizard(env, chatId);
+        await tg.sendText(token, chatId, '已取消当前操作，没有改动任何配置。');
+      } else {
+        await tg.sendText(token, chatId, '当前没有进行中的操作。');
+      }
+      return;
+
     default:
       await tg.sendText(
         token, chatId,
@@ -397,9 +422,22 @@ export async function runInspection(env, config, token, chatId) {
  * 这是新版菜单的核心：回复键盘的按钮点一下就等于替你发一条消息，
  * 所以这里要做「文字 → 动作」的翻译。找不到对应动作时给出菜单，
  * 而不是装作没看见。
+ *
+ * ⚠️ messageId 是「添加账号」流程要用的：收到 Secret 那条消息后
+ *    必须立刻把它删掉，而删除需要 message_id。
  */
-export async function handlePlainText(env, config, token, chatId, text) {
+export async function handlePlainText(env, config, token, chatId, text, messageId = null) {
   const raw = String(text || '').trim();
+
+  // ---- 【最高优先级】正在进行的「添加账号」流程 ----
+  // 必须放在所有菜单匹配**之前**。
+  // 原因：这个流程进行中时，用户发过来的是一串 AccessKey（不是菜单文字），
+  // 如果先走菜单匹配，会被判成「没听懂」并打断流程 —— 用户就卡住了。
+  // 流程自己会判断「这条消息属不属于我」，不属于才返回 false 交回下面处理。
+  const consumed = await handleAddAccountStep(env, token, chatId, raw, messageId);
+  if (consumed) {
+    return;
+  }
 
   // ---- 收起菜单 ----
   if (L.matchMain(raw, L.LBL_HIDE)) {
@@ -449,6 +487,10 @@ export async function handlePlainText(env, config, token, chatId, text) {
   }
   if (L.matchMain(raw, L.LBL_DEVICES)) {
     await sendDeviceList(token, chatId, config);
+    return;
+  }
+  if (L.matchMain(raw, L.LBL_ADD_ACCOUNT)) {
+    await startAddAccount(env, token, chatId);
     return;
   }
   if (L.matchMain(raw, L.LBL_RUN)) {
@@ -556,6 +598,9 @@ export async function handleUpdate(env, update) {
   if (message) {
     const chatId = message?.chat?.id;
     const text = message?.text || '';
+    // messageId 传下去是给「添加账号」流程用的 ——
+    // 收到 Secret 那条消息后要立刻删掉，删除需要 message_id。
+    const messageId = message?.message_id || null;
     if (!isAuthorized(config, chatId)) {
       // 静默丢弃，不暴露机器人存在
       return;
@@ -563,7 +608,7 @@ export async function handleUpdate(env, update) {
     if (text.startsWith('/')) {
       await handleCommand(env, config, token, chatId, text);
     } else {
-      await handlePlainText(env, config, token, chatId, text);
+      await handlePlainText(env, config, token, chatId, text, messageId);
     }
     return;
   }

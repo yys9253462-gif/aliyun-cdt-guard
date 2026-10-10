@@ -152,6 +152,31 @@ export async function hideMenu(token, chatId, text = '菜单已收起。发送 /
   return (await callApi(token, 'sendMessage', payload)) !== null;
 }
 
+/**
+ * 删除一条消息。
+ *
+ * ⚠️ 为什么需要这个（安全相关，不是功能需要）：
+ *    「在机器人里添加阿里云账号」这个流程要求用户**把 Secret 发给机器人**。
+ *    而 Telegram 的聊天记录是**永久保存**的 —— 那条带 Secret 的消息
+ *    会一直躺在你的聊天里，翻历史就能看到，截屏也会带上。
+ *    所以收到之后第一件事就是**把它删掉**。
+ *
+ * 约束（Telegram 的硬限制，删不掉是正常的）：
+ *   · 只能删「48 小时内」的消息，更早的删不掉；
+ *   · 机器人只能删自己收到的、以及自己发出的消息，删不了用户其它消息；
+ *   · 需要满足一定条件（对方不是匿名管理员等），否则返回 400 或 403。
+ * 所以这个函数**失败是正常情况**，调用方不要把它当错误处理 ——
+ * 删不掉时应该提醒用户「请自己手动删除那条消息」。
+ */
+export async function deleteMessage(token, chatId, messageId) {
+  if (!messageId) return false;
+  const result = await callApi(token, 'deleteMessage', {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+  return result !== null;
+}
+
 /** 回应按钮点击（内联键盘必须回应，否则客户端一直转圈） */
 export async function answerCallback(token, callbackId, text = '') {
   return (await callApi(token, 'answerCallbackQuery', {
@@ -171,6 +196,7 @@ export async function registerCommands(token) {
     { command: 'weekly', description: '查看最近 7 天流量周报' },
     { command: 'report', description: '立即发送完整报表' },
     { command: 'run', description: '立即执行一次巡检' },
+    { command: 'cancel', description: '取消正在进行的操作（如添加账号）' },
     { command: 'help', description: '查看使用说明' },
   ];
   return (await callApi(token, 'setMyCommands', { commands })) !== null;

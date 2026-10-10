@@ -26,6 +26,7 @@ export const LBL_ACCOUNTS = '\u{1F3E6} 账号汇总';         // 🏦
 export const LBL_START_ALL = '\u{1F680} 全部开机';        // 🚀
 export const LBL_STOP_ALL = '\u{1F6D1} 全部关机';         // 🛑
 export const LBL_DEVICES = '\u{2699}\u{FE0F} 单机操作';   // ⚙️
+export const LBL_ADD_ACCOUNT = '\u{2795} 添加账号';       // ➕
 export const LBL_RUN = '\u{1F504} 立即巡检';              // 🔄
 export const LBL_HELP = '\u{2139}\u{FE0F} 使用说明';      // ℹ️
 export const LBL_HIDE = '\u{274C} 收起菜单';              // ❌
@@ -34,6 +35,13 @@ export const LBL_HIDE = '\u{274C} 收起菜单';              // ❌
 // 二级菜单
 // ---------------------------------------------------------------------------
 export const LBL_BACK_MAIN = '\u{1F3E0} 返回主菜单';      // 🏠
+
+// ---------------------------------------------------------------------------
+// 「添加阿里云账号」流程用到的按钮（二级/三级混合，都在流程内）
+// ---------------------------------------------------------------------------
+export const LBL_ADD_CONFIRM = '\u{2705} 全部加入监控';   // ✅
+export const LBL_ADD_RESCAN = '\u{1F504} 重新扫描';       // 🔄
+export const LBL_ADD_CANCEL = '\u{274C} 取消添加';        // ❌
 
 // ---------------------------------------------------------------------------
 // 三级菜单（单机操作）

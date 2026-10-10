@@ -361,7 +361,15 @@ export async function setCurrentDevice(env, chatId, instanceId) {
     return;
   }
   const sessions = await loadSessions(env);
-  sessions[String(chatId)] = { instanceId, at: nowSeconds() };
+  const key = String(chatId);
+  // ⚠️ 必须用**合并**而不是整体覆盖。
+  //    原来这里是 sessions[key] = {instanceId, at}，一旦有了别的会话字段
+  //    （比如「添加账号」这个多步流程的中间状态），就会被这一行**抹掉**。
+  //    表现是：填到一半去点了台机器，回来发现流程状态没了。
+  sessions[key] = Object.assign({}, sessions[key] || {}, {
+    instanceId,
+    at: nowSeconds(),
+  });
   await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
 }
 
@@ -370,4 +378,72 @@ export async function getCurrentDevice(env, chatId) {
   const sessions = await loadSessions(env);
   const record = sessions[String(chatId)];
   return record ? record.instanceId : null;
+}
+
+// ---------------------------------------------------------------------------
+// 多步会话（向导）状态
+// ---------------------------------------------------------------------------
+/**
+ * 存/取「正在进行的多步操作」的中间状态。
+ *
+ * 什么场景需要：像「添加阿里云账号」这种要连问好几步的流程
+ * （先要 AK、再要 Secret、然后确认要不要加）。
+ * Worker 没有任何常驻内存，每一步都是**独立的一次请求**，
+ * 所以「上一步问到哪了」必须落盘，否则下一条消息来了不知道该怎么接。
+ *
+ * ⚠️ 为什么把流程状态和「当前选中的机器」放在同一个会话对象里：
+ *    它们都是「这个聊天窗口的临时状态」，生命周期一样（都是几分钟的临时数据）。
+ *    分开存会让 KV 里多出一堆 keys，还容易漏清理。
+ *
+ * 自动过期（TTL）：加账号流程里会经过用户的 Secret。
+ *    我们**不把 Secret 落盘**（下一个函数专门说这事），但流程状态本身
+ *    也不该长期留着 —— 所以超过 WIZARD_TTL_SECONDS 就当作过期作废。
+ */
+const WIZARD_TTL_SECONDS = 900; // 15 分钟：够慢慢填，又不至于一直挂着
+
+/** 读取多步流程状态；不存在、或已过期，都返回 null */
+export async function getWizard(env, chatId) {
+  const sessions = await loadSessions(env);
+  const record = sessions[String(chatId)] || {};
+  const wizard = record.wizard;
+  if (!wizard || typeof wizard !== 'object') {
+    return null;
+  }
+  const at = Number(wizard.at || 0);
+  if (nowSeconds() - at > WIZARD_TTL_SECONDS) {
+    await clearWizard(env, chatId);
+    return null;
+  }
+  return wizard;
+}
+
+/** 写入多步流程状态（自动带上时间戳） */
+export async function setWizard(env, chatId, wizard) {
+  if (!bucket(env)) {
+    return;
+  }
+  const sessions = await loadSessions(env);
+  const key = String(chatId);
+  sessions[key] = Object.assign({}, sessions[key] || {}, {
+    wizard: Object.assign({}, wizard, { at: nowSeconds() }),
+  });
+  await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
+}
+
+/** 清掉多步流程状态（流程结束或取消时调用） */
+export async function clearWizard(env, chatId) {
+  if (!bucket(env)) {
+    return;
+  }
+  const sessions = await loadSessions(env);
+  const key = String(chatId);
+  if (!sessions[key]) {
+    return;
+  }
+  delete sessions[key].wizard;
+  // 如果这个会话已经没有任何状态了，整个删掉，别在 KV 里留空对象
+  if (!Object.keys(sessions[key]).length) {
+    delete sessions[key];
+  }
+  await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
 }
