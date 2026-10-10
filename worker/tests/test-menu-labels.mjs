@@ -1,0 +1,135 @@
+/**
+ * menu-labels.js 自检
+ *
+ * 重点验证：
+ *   1. emoji 转义是否真的被解释（而不是变成字面文本 "U0001f4ca"）
+ *   2. 13 项一级菜单标签无重复、不含英文字母
+ *   3. buildDeviceButton / parseDeviceButton / matchMain 往返正确
+ */
+
+import * as M from '../src/menu-labels.js';
+
+let pass = 0;
+let fail = 0;
+
+function check(name, cond, extra = '') {
+  if (cond) {
+    pass += 1;
+    console.log(`  \u2705 ${name}`);
+  } else {
+    fail += 1;
+    console.log(`  \u274C ${name}  ${extra}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('--- 1. emoji 转义是否被解释 ---');
+const rawDump = JSON.stringify(M.LBL_OVERVIEW);
+console.log(`  LBL_OVERVIEW 原始值: ${rawDump}`);
+console.log(`  LBL_DEVICES  原始值: ${JSON.stringify(M.LBL_DEVICES)}`);
+check('总览含 U+1F4CA', M.LBL_OVERVIEW.includes('\u{1F4CA}'), rawDump);
+check('总览不含字面 U0001f4ca', !M.LBL_OVERVIEW.toLowerCase().includes('u0001f4ca'));
+check('单机操作含 U+2699', M.LBL_DEVICES.includes('\u{2699}'));
+check('实例按钮前缀含 U+1F5A5', M.DEVICE_PREFIX.includes('\u{1F5A5}'));
+check('暂停标记含 U+23F8', M.PAUSED_MARK.includes('\u{23F8}'));
+
+// ---------------------------------------------------------------------------
+console.log('--- 2. 一级菜单 13 项 ---');
+const mainLabels = [
+  M.LBL_OVERVIEW, M.LBL_TRAFFIC, M.LBL_STATUS, M.LBL_REPORT,
+  M.LBL_WEEKLY, M.LBL_BALANCE, M.LBL_ACCOUNTS, M.LBL_START_ALL,
+  M.LBL_STOP_ALL, M.LBL_DEVICES, M.LBL_RUN, M.LBL_HELP, M.LBL_HIDE,
+];
+console.log(`  一级菜单项数: ${mainLabels.length}`);
+check('项数为 13', mainLabels.length === 13);
+
+const uniq = new Set(mainLabels);
+check('无重复', uniq.size === mainLabels.length,
+  `实际去重后 ${uniq.size}`);
+
+// 是否所有标签都用了 emoji 前缀（前 2 个 UTF-16 码元里应含非 ASCII）
+const badIcon = mainLabels.filter((l) => {
+  const first = l.codePointAt(0);
+  return first < 0x2000; // 第一个码点如果是普通 ASCII，说明没图标
+});
+check('每项都有 emoji 前缀', badIcon.length === 0, badIcon.join(' | '));
+
+// 去掉图标后，剩下的文字不应含英文字母
+const withLatin = mainLabels.filter((l) => /[A-Za-z]/.test(M.stripIcon(l)));
+check('去掉图标后不含英文字母', withLatin.length === 0,
+  `违规: ${withLatin.join(' , ')}`);
+
+// 去掉图标后也不能还有 emoji 残留
+const leftoverIcon = mainLabels.filter((l) => /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(M.stripIcon(l)));
+check('去掉图标后无 emoji 残留', leftoverIcon.length === 0,
+  `违规: ${leftoverIcon.join(' , ')}`);
+
+// 打印一遍给人眼看
+console.log('  菜单实际渲染:');
+for (const l of mainLabels) {
+  console.log(`    ${l}    \u2192 纯文字「${M.stripIcon(l)}」`);
+}
+
+// ---------------------------------------------------------------------------
+console.log('--- 3. buildDeviceButton \u2192 parseDeviceButton 往返 ---');
+const cases = [
+  ['菲律宾节点', false, '\u{1F5A5} 菲律宾节点'],
+  ['新加坡节点', true, '\u{1F5A5} 新加坡节点 \u{23F8}\u{FE0F}'],
+  ['x'.repeat(20), false, null], // 超长会被截断，只校验前缀
+];
+for (const [name, paused, expect] of cases) {
+  const btn = M.buildDeviceButton(name, paused);
+  console.log(`    输入「${name}」暂停=${paused} \u2192 按钮「${btn}」`);
+  if (expect !== null) {
+    check(`按钮文字符合预期: ${expect}`, btn === expect, `实际「${btn}」`);
+  }
+  check(`按钮不以字母开头`, !/^[A-Za-z]/.test(btn));
+}
+
+// 往返
+const btn1 = M.buildDeviceButton('菲律宾节点', false);
+const back1 = M.parseDeviceButton(btn1);
+console.log(`  带图标反查: ${JSON.stringify(back1)}`);
+check('反查得到「菲律宾节点」', back1 === '菲律宾节点');
+
+const btn2 = M.buildDeviceButton('新加坡节点', true);
+const back2 = M.parseDeviceButton(btn2);
+console.log(`  暂停态反查: ${JSON.stringify(back2)}`);
+check('暂停态反查得到「新加坡节点」', back2 === '新加坡节点');
+
+const btn3 = M.buildDeviceButton('美东备用服务器边节点', false);
+const back3 = M.parseDeviceButton(btn3);
+console.log(`  超长名按钮: ${JSON.stringify(btn3)} \u2192 反查 ${JSON.stringify(back3)}`);
+check('超长名反查是原名的前缀', '美东备用服务器边节点'.startsWith(back3), `反查「${back3}」`);
+
+console.log(`  非实例按钮反查: ${JSON.stringify(M.parseDeviceButton('\u{1F4CA} 总览'))}`);
+check('非实例按钮反查为 null', M.parseDeviceButton('\u{1F4CA} 总览') === null);
+
+// ---------------------------------------------------------------------------
+console.log('--- 4. matchMain 两种输入都认 ---');
+for (const l of mainLabels) {
+  const stripped = M.stripIcon(l);
+  const okIcon = M.matchMain(l, l);
+  const okPlain = M.matchMain(stripped, l);
+  if (!okIcon || !okPlain) {
+    check(`匹配「${l}」`, false, `带图标=${okIcon} 纯文字=${okPlain}`);
+  }
+}
+check('全部 13 项：带图标 / 纯文字 都能匹配',
+  mainLabels.every((l) => M.matchMain(l, l) && M.matchMain(M.stripIcon(l), l)));
+
+check('乱输入不误匹配', !M.matchMain('随便打点什么', M.LBL_OVERVIEW));
+check('空字符串不误匹配', !M.matchMain('', M.LBL_OVERVIEW));
+
+// ---------------------------------------------------------------------------
+console.log('--- 5. stripIcon 边界 ---');
+check('无图标原样返回', M.stripIcon('总览') === '总览');
+check('带空格也能剥', M.stripIcon('  \u{1F4CA}  总览  ') === '总览');
+check('变体选择符一起剥', M.stripIcon('\u{2699}\u{FE0F} 单机操作') === '单机操作');
+check('空串安全', M.stripIcon('') === '');
+check('null 安全', M.stripIcon(null) === '');
+
+// ---------------------------------------------------------------------------
+console.log('');
+console.log(`===== 结果: 通过 ${pass} / 失败 ${fail} =====`);
+process.exit(fail === 0 ? 0 : 1);

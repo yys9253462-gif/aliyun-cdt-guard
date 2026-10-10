@@ -1,0 +1,17 @@
+{
+  "name": "cdt-guard-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "阿里云 CDT 流量守护 · Cloudflare Workers 版（解决被监控机器关机后无法自动开机的死锁）",
+  "type": "module",
+  "scripts": {
+    "test": "bash tests/run-all.sh",
+    "dev": "wrangler dev --local",
+    "deploy": "bash deploy.sh",
+    "configure": "bash configure.sh",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

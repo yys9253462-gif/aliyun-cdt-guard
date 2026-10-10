@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# Cloudflare 部署工具的运行缓存
+.wrangler/
+
+# 部署后自动记下的访问网址（每人不同，不该进版本库）
+.worker-url
+
+# 网址密钥的本地副本（仅供自动自检用；自己编的密钥，仍不放版本库）
+.webhook-secret
+
+# 配置脚本的临时文件
+.config-temp.json
+.config-payload.json
+.test-payload.json
+
+# 配置文件的自动备份（改 KV id 时生成）
+wrangler.toml.bak-*
+
+# 万一有人把密钥写进临时文件
+.dev.vars
+.env
+*.local

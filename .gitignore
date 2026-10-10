@@ -8,3 +8,14 @@ traffic_history.json
 *.log
 bot.lock
 guard.lock
+
+# ---- Cloudflare 版（worker/ 目录）----
+worker/node_modules/
+worker/.wrangler/
+worker/.worker-url
+worker/.webhook-secret
+worker/.config-temp.json
+worker/.config-payload.json
+worker/.test-payload.json
+worker/wrangler.toml.bak-*
+worker/.dev.vars
