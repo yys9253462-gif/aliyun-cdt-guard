@@ -390,34 +390,27 @@ async function sendReport(env, config, token, chatId) {
 }
 
 /**
- * 手动执行一次巡检。
+ * 手动执行一次巡检（菜单里的「🔄 立即巡检」）。
  *
- * Python 版这里要抢文件锁防止跟定时任务打架。Worker 版没有文件锁，
- * 改用 KV 里的一次性标记做「软锁」：定时巡检和手动巡检撞车时，
- * 后来的那个会被告知「正在跑」而不是并行跑两遍（那会导致状态互相覆盖）。
+ * ⚠️ 软锁已收敛到 guard.runInspection（第五轮重构，务必看清）：
+ *     这里**不再**自己读写 manual_inspection_lock。早先本函数有一份独立锁判断，
+ *     而 guard.runInspection 里完全没有锁 —— 定时巡检根本不认这个锁，
+ *     所谓「定时与手动互斥」是假的：手动跑着，定时照样进来，状态互相覆盖。
+ *     现在锁只在 guard.runInspection 实现一次，本函数单纯转发结果。
  */
 export async function runInspection(env, config, token, chatId) {
   const { runInspection: guardRun } = await import('./guard.js');
 
-  const lockKey = 'manual_inspection_lock';
-  const state = await common.loadState(env);
-  const now = common.nowSeconds();
-  const heldSince = Number(state[lockKey] || 0);
-
-  // 软锁：3 分钟内有人跑过就拒绝
-  if (heldSince && now - heldSince < 180) {
-    await tg.sendText(
-      token, chatId,
-      '上一次巡检刚跑过（3 分钟内），为避免状态冲突，本次已取消。\n' +
-      '请稍后再试。'
-    );
-    return;
-  }
-  state[lockKey] = now;
-  await common.saveState(env, state);
-
   try {
     const summary = await guardRun(env);
+    if (summary && summary.skipped) {
+      await tg.sendText(
+        token, chatId,
+        '上一次巡检刚跑过（3 分钟内），为避免状态冲突，本次已取消。\n' +
+        '请稍后再试，或过一会儿再点。'
+      );
+      return;
+    }
     await tg.sendText(
       token, chatId,
       `巡检完成\n\n${summary}\n\n详细过程见 Cloudflare 的实时日志。`

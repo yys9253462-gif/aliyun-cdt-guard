@@ -17,45 +17,59 @@ cd "$DIR" || exit 1
 total_fail=0
 
 echo "=========================================="
-echo " 1/6  菜单文案自检"
+echo " 1/7  菜单文案自检"
 echo "=========================================="
 "$NODE" tests/test-menu-labels.mjs
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
 
 echo ""
 echo "=========================================="
-echo " 2/6  命令注册一致性自检（不联网）"
+echo " 2/7  命令注册一致性自检（不联网）"
 echo "=========================================="
 "$NODE" tests/test-commands.mjs
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
 
 echo ""
 echo "=========================================="
-echo " 3/6  集成自检（不联网）"
+echo " 3/7  集成自检（不联网）"
 echo "=========================================="
 timeout 60 "$NODE" tests/test-integration.mjs
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
 
 echo ""
 echo "=========================================="
-echo " 4/6  添加账号流程自检（不联网）"
+echo " 4/7  添加账号流程自检（不联网）"
 echo "=========================================="
 timeout 60 "$NODE" tests/test-add-account.mjs
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
 
 echo ""
 echo "=========================================="
-echo " 5/6  凭据失效处理自检（不联网）"
+echo " 5/7  凭据失效处理自检（不联网）"
 echo "=========================================="
 timeout 60 "$NODE" tests/test-credential.mjs
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
 
 echo ""
 echo "=========================================="
-echo " 6/6  部署脚本自检（不联网）"
+echo " 6/7  部署脚本自检（不联网）"
 echo "=========================================="
 timeout 240 bash tests/test-scripts.sh
 [ $? -ne 0 ] && total_fail=$((total_fail + 1))
+
+echo ""
+echo "=========================================="
+echo " 7/7  Windows 启动器自检（仅 Windows）"
+echo "=========================================="
+# 交付包面向 Windows 小白用户，启动器是最先被双击的东西，
+# 它的「找不到 Git Bash 时给指引」这条分支必须验证。
+# 非 Windows 环境（Git Bash 的 uname 为 MINGW*/MSYS*）跳过，不算失败。
+if command -v powershell >/dev/null 2>&1; then
+  powershell -NoProfile -ExecutionPolicy Bypass -File tests/test-launcher.ps1
+  [ $? -ne 0 ] && total_fail=$((total_fail + 1))
+else
+  echo "  跳过：当前环境没有 powershell（非 Windows）"
+fi
 
 echo ""
 if [ "$total_fail" -eq 0 ]; then

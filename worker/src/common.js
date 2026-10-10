@@ -81,13 +81,22 @@ export function nowSeconds() {
 // ---------------------------------------------------------------------------
 
 /**
- * 清洗实例名 / 报错信息里的特殊字符。
+ * 清洗实例名 / 报错信息里的特殊字符，**并顺带遮蔽疑似密钥**。
  *
- * 为什么必须做：Telegram 的 Markdown 里 _ * ` [ ] 都是标记字符，
- * 用户给实例起名带了下划线（如 my_server）就会让整条消息解析失败。
+ * 为什么必须做两件事：
+ *   1) Telegram 的 Markdown 里 _ * ` [ ] 都是标记字符，
+ *      用户给实例起名带了下划线（如 my_server）就会让整条消息解析失败。
+ *   2) 本函数的 49 个调用点里，有相当一部分是把**阿里云返回的报错原文**
+ *      经此函数清洗后直接发往 Telegram（如 guard.js 的「开机指令下发失败」）。
+ *      而阿里云的签名类报错里恰好会带上 AccessKeyId=LTAIxxxx，
+ *      故这里必须一并遮蔽，否则密钥会随告警消息发出去。
+ *
+ * ⚠️ 历史坑（务必看清）：本函数原名只做 Markdown 清洗，不做遮蔽。
+ *     实测 `sanitize('...AccessKeyId=LTAI5tFakeKeyExample...&Signature=abc')`
+ *     会把密钥原样输出到 Telegram。现已合并 redact 的遮蔽能力。
  */
 export function sanitize(text) {
-  return String(text === undefined || text === null ? '' : text)
+  return redact(String(text === undefined || text === null ? '' : text))
     .replace(/[_*`\[\]]/g, ' ')
     .trim();
 }
@@ -98,10 +107,10 @@ const SECRET_KEYS = [
 ];
 
 /**
- * 日志里不能出现密钥，做一次粗粒度遮蔽后再输出。
+ * 日志/消息里不能出现密钥，做遮蔽后再输出。
  *
- * 注意：Workers 的日志会保留在 Cloudflare 后台，
- * 所以这里必须屏蔽 —— 否则密钥会散落到日志系统里。
+ * 注意：Workers 的日志会保留在 Cloudflare 后台，且清洗后的文本会发往 Telegram，
+ * 所以这里必须屏蔽 —— 否则密钥会散落到日志系统与聊天记录里。
  *
  * ⚠️ 实现上踩过一个致命坑（务必看清再改）：
  *     曾经写成「找到 key 后，向后找等号，把等号后面的值换成 [已隐藏]」。
@@ -116,18 +125,46 @@ const SECRET_KEYS = [
  * 现在改为**正则一次性替换，并且连 key 名一起吃掉**：
  *     AccessKeyId=LTAI5tSecretValue123  ->  [已隐藏]
  * 这样替换结果里不再含 key，天然不会重复匹配。
+ *
+ * ⚠️ 第二轮覆盖度漏洞（已补，务必看清）：
+ *     上面「key 名 + 分隔符 + 值」的写法只覆盖「有字段名」的形态。
+ *     实测以下三种**会泄漏**（阿里云报错里都真实出现过）：
+ *       · 裸密钥（无字段名） : error with LTAI5tFakeKeyExample... inside
+ *       · JSON 形式         : {"AccessKeyId":"LTAI5tFakeKeyExample..."}   ← 值被引号包着，旧正则的值域 \s,&,} 会提前在 " 停？
+ *                              实际旧写法把 key 名也吃掉，能命中；但若 key 名大小写/下划线变体会漏
+ *       · 中文描述前缀      : 密钥 LTAI5tFakeKeyExample... 无效
+ *     故再叠一层「按密钥自身的形态」兜底匹配（不依赖字段名），与
+ *     credential-error.js 的 sanitize 保持同一套规则。
  */
 export function redact(text) {
   let result = String(text === undefined || text === null ? '' : text);
   for (const key of SECRET_KEYS) {
     // 匹配「key 名 + 等号/冒号 + 值」，值到空白、& , } 或行尾为止。
     // 用 'gi' 一次性替换全部出现，不做 while 循环 —— 从根上消灭死循环的可能。
+    //
+    // 值域补上引号：JSON 形态 {"AccessKeyId":"LTAIxxx"} 里值被 " 包着，
+    // 旧写法遇到第一个 " 就截断，屏障只剩一个引号；这里显式允许引号包裹。
     const pattern = new RegExp(
-      `${key}\\s*[=:]\\s*[^&\\s,}\\]]*`,
+      `["']?${key}["']?\\s*[=:]\\s*["']?[^&\\s,}\\]"']*["']?`,
       'gi'
     );
     result = result.replace(pattern, '[已隐藏]');
   }
+  // ---- 形态兜底：不依赖字段名，直接按密钥本身的特征打码 ----
+  // 阿里云 AK 固定 LTAI 开头（长度 20+），整串打掉。
+  result = result.replace(/LTAI[A-Za-z0-9]{6,}/g, '[已隐藏]');
+  // 长的高熵串（疑似 Secret）：24 位以上的字母数字混合，且必须同时含大小写字母，
+  // 避免误伤纯数字的时间戳/毫秒值与小写英文单词。
+  //
+  // ⚠️ 为什么用回调而不是纯正则：曾试图写成多重前瞻
+  //    /(?=[A-Za-z0-9]{24,}\b)(?=[^A-Za-z]*[A-Z])(?=[^A-Za-z]*[a-z])[A-Za-z0-9]+\b/
+  //    实测**永不命中**（前瞻里的 \b 与 [^A-Za-z]* 组合行为不符合直觉，
+  //    AbCdEfGhIjKlMnOpQrStUvWx 这种标准混合串都匹配不到）。
+  //    改用「先匹配长度，再用普通 JS 判定大小写」，行为确定、易读易验。
+  result = result.replace(/\b[A-Za-z0-9]{24,}\b/g, (m) => {
+    if (/[A-Z]/.test(m) && /[a-z]/.test(m)) { return '[已隐藏]'; }
+    return m;
+  });
   return result;
 }
 
@@ -236,12 +273,36 @@ export async function loadState(env) {
   return state || {};
 }
 
-/** 保存巡检状态 */
+/**
+ * 保存巡检状态。
+ *
+ * ⚠️ 两个关键设计（都是排查真实风险后定的）：
+ *
+ * 1. **写失败不抛异常**（只返回 false）。
+ *    原因：这个函数在巡检循环里是「每台机器存一次」。如果 KV 写入失败
+ *    （最典型的是免费版**每天 1000 次写入额度用尽**，Cloudflare 会直接
+ *    让 put 报错），抛异常会**中断整个巡检循环** —— 后面的机器一台都不查了，
+ *    等于「因为存不下结果，干脆连检查都不做了」。这比丢一次状态严重得多。
+ *    所以这里吞掉写入错误，让巡检继续跑完。
+ *
+ * 2. 调用方应尽量**减少调用次数**（见 runInspection 的批量写法）。
+ *    免费版 KV 每天只有 1000 次写入，而巡检是每 5 分钟一轮（288 轮/天），
+ *    每轮多写一次就多占 288 次额度。按机器数逐台写会让额度随机器数线性爆掉。
+ *
+ * @returns {Promise<boolean>} 是否写入成功
+ */
 export async function saveState(env, state) {
   if (!bucket(env)) {
-    return;
+    return false;
   }
-  await bucket(env).put(KV_STATE, JSON.stringify(state));
+  try {
+    await bucket(env).put(KV_STATE, JSON.stringify(state));
+    return true;
+  } catch (error) {
+    // 故意不抛：状态存不下，也不能让巡检停下
+    console.log(`[状态] 写入失败（不影响本轮巡检继续）: ${String(error && error.message || error)}`);
+    return false;
+  }
 }
 
 /** 判断某个事件是否已过冷却期，可以再次通知 */
@@ -299,41 +360,87 @@ export async function loadHistory(env) {
  *   每次巡检（5 分钟）都追加一条会让数据膨胀得很快（一天 288 条 × 台数）。
  *   所以同一台机器**同一天只保留最新一条**，粒度按天 —— 周报看的是
  *   每日用量趋势，5 分钟级精度既没必要也浪费存储。
+ *
+ * ⚠️ 额度提醒：**每调一次就写一次 KV**。免费版每天只有 1000 次写入，
+ *    所以巡检时应改用 appendTrafficHistoryBatch（一轮只写一次），
+ *    否则额度会随机器数线性爆掉。这个单条版本保留给测试与单机场景。
  */
 export async function appendTrafficHistory(env, instanceId, name, trafficGb) {
-  if (!bucket(env) || trafficGb === null || trafficGb === undefined || trafficGb < 0) {
-    return;
+  await appendTrafficHistoryBatch(env, [
+    { instanceId, name, trafficGb },
+  ]);
+}
+
+/**
+ * **批量**记录流量快照 —— 一轮巡检只写一次 KV。
+ *
+ * 为什么要这个版本：
+ *   Cloudflare 免费版 KV 每天只有 **1000 次写入**，巡检每 5 分钟一轮
+ *   （288 轮/天）。原来逐台机器调用 appendTrafficHistory，
+ *   每轮写入次数 = 机器台数，额度占用 = 台数 × 288：
+ *     1 台 → 288 次/天（可接受）
+ *     2 台 → 576 次/天
+ *     3 台 → 864 次/天（逼近 1000 上限）
+ *     4 台以上 → 必然超额，KV 写入开始报错
+ *   改成一轮写一次后，无论多少台机器都只占 288 次 —— 与台数解耦。
+ *
+ * @param {Array<{instanceId: string, name: string, trafficGb: number}>} entries
+ */
+export async function appendTrafficHistoryBatch(env, entries) {
+  if (!bucket(env)) {
+    return false;
+  }
+  const list = Array.isArray(entries) ? entries : [];
+  // 过滤掉无效项（查询失败的机器会传 null / 负数）
+  const valid = list.filter((e) => {
+    const g = e && e.trafficGb;
+    return e && e.instanceId && g !== null && g !== undefined && Number(g) >= 0;
+  });
+  if (!valid.length) {
+    return false;
   }
 
-  const now = nowLocal();
-  const day = formatDate(now);
-  const record = {
-    instance_id: instanceId,
-    name,
-    date: day,
-    time: formatTime(now),
-    traffic_gb: Math.round(Number(trafficGb) * 10000) / 10000,
-  };
+  try {
+    const now = nowLocal();
+    const day = formatDate(now);
+    const time = formatTime(now);
 
-  let history = await loadHistory(env);
+    let history = await loadHistory(env);
 
-  // 同一天同一台机器只留最新一条
-  history = history.filter(
-    (item) => !(item.instance_id === instanceId && item.date === day)
-  );
-  history.push(record);
+    // 同一天同一台机器只留最新一条：先把本轮涉及到的机器旧记录摘掉
+    const touched = new Set(valid.map((e) => e.instanceId));
+    history = history.filter(
+      (item) => !(touched.has(item.instance_id) && item.date === day)
+    );
 
-  // 裁掉过老的记录，防止数据无限增长
-  const cutoffDate = new Date(now.getTime() - HISTORY_KEEP_DAYS * 86400 * 1000);
-  const cutoff = formatDate(cutoffDate);
-  history = history.filter((item) => String(item.date || '') >= cutoff);
-  history.sort((a, b) => {
-    const left = `${a.date || ''} ${a.time || ''}`;
-    const right = `${b.date || ''} ${b.time || ''}`;
-    return left < right ? -1 : (left > right ? 1 : 0);
-  });
+    for (const e of valid) {
+      history.push({
+        instance_id: e.instanceId,
+        name: e.name,
+        date: day,
+        time,
+        traffic_gb: Math.round(Number(e.trafficGb) * 10000) / 10000,
+      });
+    }
 
-  await bucket(env).put(KV_HISTORY, JSON.stringify(history));
+    // 裁掉过老的记录，防止数据无限增长
+    const cutoffDate = new Date(now.getTime() - HISTORY_KEEP_DAYS * 86400 * 1000);
+    const cutoff = formatDate(cutoffDate);
+    history = history.filter((item) => String(item.date || '') >= cutoff);
+
+    history.sort((a, b) => {
+      const left = `${a.date || ''} ${a.time || ''}`;
+      const right = `${b.date || ''} ${b.time || ''}`;
+      return left < right ? -1 : (left > right ? 1 : 0);
+    });
+
+    await bucket(env).put(KV_HISTORY, JSON.stringify(history));
+    return true;
+  } catch (error) {
+    // 台账写不进去不该中断巡检（额度用尽时会走到这里）
+    console.log(`[台账] 写入失败（不影响巡检）: ${String(error && error.message || error)}`);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

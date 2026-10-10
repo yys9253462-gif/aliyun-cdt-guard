@@ -67,7 +67,17 @@ export function classifyError(error) {
       reason: `${raw}\n\n访问密钥口令不对。请重新复制一次（注意别带上空格）。`,
     };
   }
-  if (/Forbidden|no permission|not authorized|Ram|denied/i.test(raw)) {
+  // ⚠️ Ram 必须带词边界，且必须处在**权限语境**里，否则会大面积误伤：
+  //    · 「Invalid parameter」「program failed」「grammar error」里都含 ram，
+  //      被 i 标志一匹配就全判成「密钥权限不足」——而阿里云的参数校验错误
+  //      恰好大量带 parameter，用户会被引去白折腾 RAM 权限（实测踩过）。
+  //    · 裸的 \bRAM\b 也不行：「ram usage high」（内存占用高）会被误判。
+  //      阿里云权限类报错一定是「RAM + 权限词」共现（如 Forbidden.RAM、
+  //      RAM ... not authorized），所以要求两者同时出现才算数。
+  const permWord = /Forbidden|no permission|not authorized|\bdenied\b|not allowed/i;
+  const ramPerm = /\bRAM\b[\s\S]{0,40}?(?:not authorized|no permission|denied|forbidden|not allowed|权限|授权)/i
+    || /(?:Forbidden\.RAM|RAM\.(?:NoPermission|PolicyDenied))/i;
+  if (permWord.test(raw) || ramPerm.test(raw)) {
     return {
       kind: ERR_CREDENTIAL,
       raw,

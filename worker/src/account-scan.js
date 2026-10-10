@@ -176,7 +176,10 @@ export function formatScanResult(instances, maxShow = 20) {
   for (let i = 0; i < show.length; i += 1) {
     const item = show[i];
     const name = common.sanitize(item.instanceName || '(未命名)');
-    const quota = item.isOverseas ? '200GB 免费额度' : '20GB 免费额度';
+    // 额度数值统一从 aliyun-api 取，避免这里写死 20/200 后哪天改了常量漏改此处
+    const quota = `${api.isOverseasRegion(item.region)
+      ? api.FREE_QUOTA_OVERSEAS_GB
+      : api.FREE_QUOTA_MAINLAND_GB}GB 免费额度`;
     lines.push(`${i + 1}. ${name}`);
     lines.push(`   地域 ${item.region} · ${item.status || '未知状态'} · ${quota}`);
     lines.push(`   ${item.instanceId}`);

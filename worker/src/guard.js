@@ -45,6 +45,21 @@ const USER_CHECK_TIMEOUT_MS = 100000;
 const START_WAIT_TIMEOUT_MS = 90000;
 const START_POLL_INTERVAL_MS = 8000;
 
+/**
+ * 巡检软锁：手动巡检与定时巡检**共用**的互斥标记（存 state 的键名）。
+ *
+ * ⚠️ 键名必须与 bot-listener.js 读的是同一个，否则两边锁不到一起。
+ *    已导出为常量，禁止在任何文件里另写字面量。
+ */
+export const MANUAL_INSPECTION_LOCK = 'manual_inspection_lock';
+/**
+ * 软锁时间窗（秒）—— 3 分钟。
+ * 为什么是 3 分钟：定时巡检每 5 分钟一次，手动巡检一轮通常几秒到几十秒。
+ * 设 3 分钟能挡住「刚跑完又手动点」和「手动跑着定时又进来」，
+ * 又不会把正常的 5 分钟定时周期误挡掉。
+ */
+export const INSPECTION_LOCK_WINDOW = 180;
+
 /** 简易日志器：Workers 里日志会进 Cloudflare 后台 */
 function makeLogger(tag) {
   return (message) => console.log(`[${tag}] ${message}`);
@@ -394,8 +409,14 @@ async function handleCheckFailure(state, config, name, key, error, logger) {
   }
 }
 
-/** 巡检单个实例 */
-async function checkOne(env, user, config, state, logger) {
+/**
+ * 巡检单个实例。
+ *
+ * @param {Array} [collector] 可选的台账收集器。传了就把本机的流量快照 push 进去，
+ *        由调用方在一轮结束后**批量写一次 KV**（省额度，见 appendTrafficHistoryBatch）。
+ *        不传则跳过台账记录（单机调用场景）。
+ */
+async function checkOne(env, user, config, state, logger, collector) {
   const instanceId = user.instance_id;
   const name = user.name || instanceId;
   const key = instanceId;
@@ -455,7 +476,13 @@ async function checkOne(env, user, config, state, logger) {
     await checkMoney(user, config, state, name, key, logger);
 
     // ---- 记录流量台账（周报数据源）----
-    await common.appendTrafficHistory(env, instanceId, name, trafficGb);
+    // ⚠️ 这里**不再直接写 KV**，而是把数据交给调用方（collector）统一收集。
+    //    原因：免费版 KV 每天只有 1000 次写入，而巡检每 5 分钟一轮。
+    //    如果每台机器都写一次，额度占用 = 台数 × 288，3 台就逼近上限、
+    //    4 台必然超额。改成一轮批量写一次后，与台数解耦（恒为 288 次/天）。
+    if (collector) {
+      collector.push({ instanceId, name, trafficGb });
+    }
 
     if (trafficGb < limitGb) {
       if (status === 'Stopped') {
@@ -481,7 +508,7 @@ async function checkOne(env, user, config, state, logger) {
  *    Workers 里没有 SIGALRM 这种进程级信号，
  *    所以在超时点「放弃等待这个 Promise」是唯一可行的做法。
  */
-async function checkWithTimeout(env, user, config, state, logger) {
+async function checkWithTimeout(env, user, config, state, logger, collector) {
   const name = user.name || user.instance_id || '未知';
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -492,7 +519,7 @@ async function checkWithTimeout(env, user, config, state, logger) {
   });
 
   try {
-    await Promise.race([checkOne(env, user, config, state, logger), timeout]);
+    await Promise.race([checkOne(env, user, config, state, logger, collector), timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -505,27 +532,72 @@ async function checkWithTimeout(env, user, config, state, logger) {
  *
  * 为什么要单独暴露这个函数：Worker 的 scheduled 事件会调它，
  * 同时机器人菜单的「立即巡检」也会调它 —— 两条路复用同一份逻辑。
+ *
+ * ⚠️ 关于「手动巡检软锁」的历史坑（第五轮发现并修复）：
+ *     早先只有 bot-listener.js 的手动巡检检查 `manual_inspection_lock`，
+ *     而**定时巡检完全不看这个锁** —— 于是「注释里写的双向互斥」根本没实现：
+ *     你点「立即巡检」的同时，5 分钟一次的定时巡检照跑不误，
+ *     两轮巡检会同时读写同一份 state，**后写的把先写的覆盖掉**。
+ *     现在把锁收进本函数（两条路共用的唯一入口），真正做到双向互斥。
  */
-export async function runInspection(env) {
+export async function runInspection(env, options = {}) {
   const logger = makeLogger('巡检');
+  const lockKey = MANUAL_INSPECTION_LOCK;
+  const now = common.nowSeconds();
 
   try {
     const config = await common.loadConfig(env);
     const state = await common.loadState(env);
     const users = config.users || [];
 
+    // ---- 软锁：3 分钟内已有巡检跑过（不管是手动还是定时），本次让路 ----
+    // 用「上次巡检开始时间」而非「正在运行」来判断：Worker 无常驻内存，
+    // 无法可靠知道另一实例是否真的还在跑，只能用时间窗近似。
+    //
+    // ⚠️ 为什么锁值在**本轮结束时**才写入（而不是进函数就写）：
+    //     进函数就写虽然互斥更强，但会让每轮多一次 KV 写入 ——
+    //     定时巡检 288 轮/天，再多 1 次就是 864 次/天（额度 1000，占 86%）。
+    //     改成「结束时随本轮 saveState 一起写」则**零额外写入**，
+    //     互斥效果几乎相同：并发进来的那一方（相差几秒~几十秒）依然看得到
+    //     上一轮留下的时间戳，因为窗口是 180 秒 >> 一轮耗时。
+    const heldSince = Number(state[lockKey] || 0);
+    if (!options.force && heldSince && now - heldSince < INSPECTION_LOCK_WINDOW) {
+      logger(`距上次巡检仅 ${now - heldSince} 秒（< ${INSPECTION_LOCK_WINDOW} 秒），本次跳过以免状态冲突`);
+      return { ok: true, skipped: true, checked: 0 };
+    }
+
     if (!users.length) {
       logger('配置里没有机器，什么都不做');
       return { ok: true, checked: 0 };
     }
 
+    // 记录本轮开始时间，等会儿随 state 一起落盘（见下方 saveState）
+    state[lockKey] = now;
+
     logger(`开始巡检，共 ${users.length} 台机器`);
 
+    // 台账收集器：逐台收集，一轮结束**批量写一次** KV。
+    // 为什么不在循环里逐台写：免费版 KV 每天只有 1000 次写入，
+    // 逐台写会让额度占用 = 台数 × 288/天，几台机器就把额度吃光。
+    const collector = [];
+
     for (const user of users) {
-      await checkWithTimeout(env, user, config, state, logger);
-      // 每台跑完就存一次状态，避免后面的机器出错导致前面的记录丢失
-      await common.saveState(env, state);
+      await checkWithTimeout(env, user, config, state, logger, collector);
     }
+
+    // 一轮结束统一落盘：状态一次 + 台账一次 = 恒定 2 次写入，
+    // 与机器台数**解耦**（原来是每台各写一次，额度随台数线性增长）。
+    // 注意：这次 saveState 同时把本轮开始时间（软锁）写进去了，
+    //       所以互斥**不额外花额度**。
+    //
+    // 为什么可以一轮只写一次（原本是「每台存一次防丢」）：
+    //   · 整个循环只跑几十秒，中途挂掉的概率低；
+    //   · 真中途挂了，丢的也只是「本轮冷却时间戳」这种可自愈的数据，
+    //     不会丢配置、不会丢机器；
+    //   · 而 saveState / 台账都已做「写失败不抛」保护，不会中断巡检。
+    //   用「极小概率丢一点可自愈的计时数据」换「额度不随台数爆掉」，值。
+    await common.saveState(env, state);
+    await common.appendTrafficHistoryBatch(env, collector);
 
     logger('巡检结束');
     return { ok: true, checked: users.length };

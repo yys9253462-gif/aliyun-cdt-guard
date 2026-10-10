@@ -178,6 +178,75 @@ console.log('--- 2. 暂时性错误不能被误报成「密钥失效」（否则
   }
 }
 
+console.log('--- 2b. 🔴 子串误伤排查（「ram」藏在普通单词里）---');
+{
+  // 补一个真实踩过的误报源：
+  //   权限那条正则里原本写着裸的 `Ram`，而 i 标志让它匹配任何含 ram 的单词。
+  //   阿里云的**参数校验错误**恰好大量带 parameter →
+  //   用户把实例 ID 填错，会收到「这把密钥权限不够，去加 RAM 权限」，
+  //   **指错方向**，白折腾一通。这类误报比漏报更坏：它把人引向错误的操作。
+  const notCredential = [
+    'Invalid parameter: InstanceId format',
+    'InvalidParameter.InstanceId',
+    'Parameter is required',
+    'grammar error',
+    'program failed',
+    'dramatic change',
+    'frame rate',
+    'ram usage high',
+    'RAM quota exceeded',
+    'memory ram size',
+  ];
+  for (const raw of notCredential) {
+    const r = credErr.classifyError(new Error(raw));
+    check(`不被误判为凭据问题：${raw}`,
+      r.kind !== credErr.ERR_CREDENTIAL, `实际 ${r.kind}`);
+  }
+
+  // 反向：真正该判成凭据问题的仍要判对（别为了修误报把功能修没了）
+  const stillCredential = [
+    'Forbidden',
+    'Forbidden.RAM',
+    'Forbidden: no permission to perform this action',
+    'Forbidden.RAM: User not authorized to operate on the specified resource',
+    'Access denied',
+    'RAM: User not authorized',
+  ];
+  for (const raw of stillCredential) {
+    const r = credErr.classifyError(new Error(raw));
+    check(`仍能识别为凭据问题：${raw.slice(0, 40)}`,
+      r.kind === credErr.ERR_CREDENTIAL, `实际 ${r.kind}`);
+  }
+}
+
+console.log('--- 2c. 阿里云真实报错 Code 覆盖度 ---');
+{
+  // 用阿里云官方文档里各接口真实会返回的 Code 核对，防止「正则只认自己造的例子」。
+  const realCodes = [
+    ['InvalidAccessKeyId.NotFound', true],
+    ['InvalidAccessKeyId', true],
+    ['SignatureDoesNotMatch', true],
+    ['InvalidAccessKeySecret', true],
+    ['InvalidAccessKeySecret.Malformed', true],
+    ['Forbidden.RAM', true],
+    ['Forbidden', true],
+    ['InvalidSecurityToken.Expired', true],
+    ['InvalidSecurityToken.Malformed', true],
+    ['Throttling', false],
+    ['Throttling.User', false],
+    ['ServiceUnavailable', false],
+    ['InternalError', false],
+    ['InvalidInstanceId.NotFound', false],
+    ['InvalidRegionId', false],
+  ];
+  for (const [code, wantCred] of realCodes) {
+    const r = credErr.classifyError(new Error(`${code} 失败：${code}`));
+    const isCred = r.kind === credErr.ERR_CREDENTIAL;
+    check(`报错码分类正确：${code}（${wantCred ? '应为凭据类' : '不应为凭据类'}）`,
+      isCred === wantCred, `实际 ${r.kind}`);
+  }
+}
+
 console.log('--- 3. 中文原因要能指导下一步（不能只有英文原话）---');
 {
   const r = credErr.classifyError(new Error('InvalidAccessKeyId.NotFound'));
@@ -317,7 +386,7 @@ console.log('--- 9. 多个账号：逐个独立判断（一个坏不牵连另一
   // 按请求体里的 AccessKeyId 区分是哪个账号 —— 这样不受重试次数影响。
   installFakeFetch(async (u, options) => {
     const body = String(options?.body || '');
-    // 第一个账号的 AK 是 LTAI5tEh86...，坏；第二个是 LTAI5tOther...，好
+    // 第一个账号的 AK 是 LTAI5tFakeKeyExample...，坏；第二个是 LTAI5tOther...，好
     if (body.includes('LTAI5tOtherAccountKey99')) {
       return aliyunOk({
         RequestId: 'x',

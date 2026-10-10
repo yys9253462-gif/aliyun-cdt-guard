@@ -372,6 +372,29 @@ console.log('--- 11. maskAk 打码规则（多账号要能区分）---');
 }
 
 // ---------------------------------------------------------------------------
+console.log('--- 12. 契约一致性：免费额度必须来自单一来源（第四轮固化）---');
+{
+  // 背景：额度数值曾有 3 处硬编码（20 / 200），改一处漏两处的风险。
+  // 现在统一从 aliyun-api.js 的 FREE_QUOTA_* 常量取。
+  // 这组断言「常量值」与「扫描结果文案」严格对应，任一处写死新数字都会报红。
+  const api = await import('../src/aliyun-api.js');
+  const scan = await import('../src/account-scan.js');
+
+  check('内地额度常量为 20', api.FREE_QUOTA_MAINLAND_GB === 20);
+  check('非内地额度常量为 200', api.FREE_QUOTA_OVERSEAS_GB === 200);
+
+  const out = scan.formatScanResult([
+    { instanceName: '香港节点', region: 'cn-hongkong', status: 'Running', instanceId: 'i-hk' },
+    { instanceName: '北京节点', region: 'cn-beijing', status: 'Running', instanceId: 'i-bj' },
+  ]);
+  check('扫描文案：非内地显示 200GB', out.includes('200GB 免费额度'));
+  check('扫描文案：内地显示 20GB', out.includes('20GB 免费额度'));
+  // 中国香港必须走 200 这一支（不是内地）
+  check('中国香港按非内地算', api.isOverseasRegion('cn-hongkong') === true);
+  check('北京按内地算', api.isOverseasRegion('cn-beijing') === false);
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log('==========================================');
 console.log(`添加账号流程自检: 通过 ${pass} / 失败 ${fail}`);

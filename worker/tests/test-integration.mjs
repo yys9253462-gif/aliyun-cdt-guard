@@ -309,6 +309,277 @@ check('未知状态原样返回（不编造）', views.statusChinese('Starting')
 check('空状态 -> 未知', views.statusChinese('') === '未知');
 
 // ---------------------------------------------------------------------------
+console.log('--- 10. 🔴 KV 写入次数必须与机器台数解耦（免费额度只有 1000/天）---');
+{
+  // 这条是排查出来的真实隐患：
+  //   Cloudflare 免费版 KV 每天只有 **1000 次写入**，巡检每 5 分钟一轮（288 轮/天）。
+  //   原来巡检是「每台机器各写两次 KV」（状态 + 台账），
+  //   额度占用 = 台数 × 2 × 288：
+  //     1 台 → 576 次/天（58%，安全）
+  //     2 台 → 1152 次/天（**已超额**，KV 写入开始报错）
+  //     3 台 → 1728 次/天
+  //   改成「一轮批量写一次」后，无论几台都是 2 次/轮 → 576 次/天，与台数无关。
+  //   这里用「计数版假 KV」把写入次数钉死。
+  class CountingKV {
+    constructor() { this.store = new Map(); this.puts = 0; }
+    async get(key, type) {
+      const raw = this.store.get(key);
+      if (raw === undefined) return null;
+      if (type === 'json') { try { return JSON.parse(raw); } catch (e) { return null; } }
+      return raw;
+    }
+    async put(key, value) { this.puts += 1; this.store.set(key, String(value)); }
+    async delete(key) { this.store.delete(key); }
+    async list() { return { keys: [...this.store.keys()].map((name) => ({ name })) }; }
+  }
+
+  const guard = await import('../src/guard.js');
+  const realFetch = globalThis.fetch;
+  // 假阿里云：实例正常运行
+  globalThis.fetch = async () => {
+    const body = JSON.stringify({
+      RequestId: 'x', Instances: { Instance: [{ Status: 'Running' }] },
+    });
+    return { ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) };
+  };
+
+  const counts = {};
+  for (const n of [1, 2, 5, 10]) {
+    const kv = new CountingKV();
+    const localEnv = { CDT_GUARD_KV: kv };
+    const users = [];
+    for (let i = 0; i < n; i += 1) {
+      users.push({
+        name: `机器${i}`, instance_id: `i-m${i}`, region: 'ap-southeast-6',
+        ak: 'LTAI-FAKE-0000-TEST-ONLY', sk: 'FAKE-SECRET-FOR-TEST-ONLY', traffic_limit: 180,
+      });
+    }
+    await common.saveConfig(localEnv, {
+      telegram: { chat_id: '1', admin_ids: ['1'] }, users,
+    });
+    kv.puts = 0;
+    await guard.runInspection(localEnv);
+    counts[n] = kv.puts;
+    const perDay = kv.puts * 288;
+    check(`${n} 台机器时，一轮巡检写入次数固定为 2（实际 ${kv.puts}）`,
+      kv.puts === 2, `实际 ${kv.puts}`);
+    check(`${n} 台机器时，日写入 ${perDay} 次未超免费额度 1000`,
+      perDay <= 1000, `${perDay} 次/天`);
+  }
+  check('写入次数不随台数增长（1 台与 10 台相同）',
+    counts[1] === counts[10], `1台=${counts[1]} 10台=${counts[10]}`);
+
+  globalThis.fetch = realFetch;
+}
+
+// ---------------------------------------------------------------------------
+console.log('--- 11. 🔴 KV 写入失败（额度用尽）不能让巡检崩溃 ---');
+{
+  // 承接上一组：免费版额度用尽后，KV 的 put 会**直接报错**。
+  // 如果 saveState / 台账写入把异常抛出去，会中断整个巡检循环 ——
+  // 表现就是「因为存不下结果，干脆后面所有机器都不查了」，
+  // 那才是最糟的：监控在最需要它的时候（额度/配置出问题）自己先停了。
+  // 所以这两处写入必须「失败也不抛」。
+  class FailKV {
+    constructor() { this.store = new Map(); this.failWrites = false; }
+    async get(key, type) {
+      const raw = this.store.get(key);
+      if (raw === undefined) return null;
+      if (type === 'json') { try { return JSON.parse(raw); } catch (e) { return null; } }
+      return raw;
+    }
+    async put(key, value) {
+      if (this.failWrites) throw new Error('KV PUT failed: daily write limit exceeded');
+      this.store.set(key, String(value));
+    }
+    async delete(key) { this.store.delete(key); }
+    async list() { return { keys: [...this.store.keys()].map((name) => ({ name })) }; }
+  }
+
+  const kv = new FailKV();
+  const localEnv = { CDT_GUARD_KV: kv };
+
+  kv.failWrites = true;
+  let threw = false;
+  let ret = null;
+  try {
+    ret = await common.saveState(localEnv, { foo: 1 });
+  } catch (e) {
+    threw = true;
+  }
+  check('saveState 写失败时不抛异常', !threw);
+  check('saveState 写失败时返回 false（调用方可感知）', ret === false, String(ret));
+
+  threw = false;
+  ret = null;
+  try {
+    ret = await common.appendTrafficHistoryBatch(localEnv, [
+      { instanceId: 'i-a', name: 'A', trafficGb: 1.5 },
+    ]);
+  } catch (e) {
+    threw = true;
+  }
+  check('台账批量写失败时不抛异常', !threw);
+  check('台账批量写失败时返回 false', ret === false, String(ret));
+
+  // 单条版本仍在（向后兼容）
+  threw = false;
+  try {
+    await common.appendTrafficHistory(localEnv, 'i-a', 'A', 1.5);
+  } catch (e) {
+    threw = true;
+  }
+  check('单条台账写（向后兼容）失败时不抛异常', !threw);
+
+  // 最关键的一条：额度用尽时，整轮巡检仍要把所有机器检查完
+  const guard = await import('../src/guard.js');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const body = JSON.stringify({
+      RequestId: 'x', Instances: { Instance: [{ Status: 'Running' }] },
+    });
+    return { ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) };
+  };
+
+  const kv2 = new FailKV();
+  const localEnv2 = { CDT_GUARD_KV: kv2 };
+  await common.saveConfig(localEnv2, {
+    telegram: { chat_id: '1', admin_ids: ['1'] },
+    users: [
+      { name: '机器A', instance_id: 'i-a', region: 'ap-southeast-6', ak: 'x', sk: 'y', traffic_limit: 180 },
+      { name: '机器B', instance_id: 'i-b', region: 'ap-southeast-6', ak: 'x', sk: 'y', traffic_limit: 180 },
+    ],
+  });
+  kv2.failWrites = true;
+  let summary = null;
+  threw = false;
+  try {
+    summary = await guard.runInspection(localEnv2);
+  } catch (e) {
+    threw = true;
+  }
+  check('额度用尽时巡检不崩溃', !threw);
+  check('额度用尽时所有机器仍被检查（checked=2）',
+    summary && summary.checked === 2, JSON.stringify(summary));
+
+  globalThis.fetch = realFetch;
+}
+
+// ---------------------------------------------------------------------------
+// 第 12 组：敏感信息遮蔽（第三轮安全排查固化）
+//   背景：guard.js / bot-listener.js 有 20+ 处把**阿里云报错原文**
+//        经 common.sanitize 清洗后**直接发往 Telegram**。
+//        而阿里云签名类报错里会带 AccessKeyId=LTAIxxxx。
+//        曾经 common.sanitize 只洗 Markdown 字符、不遮蔽密钥 → 密钥泄漏。
+//   注意：本组用的是**假密钥**（形状真实、值随机），不是真凭据。
+// ---------------------------------------------------------------------------
+{
+  console.log('第 12 组：敏感信息遮蔽');
+  const FAKE_AK = 'LTAI5tFakeKeyForTest0000';
+  const FAKE_SK = 'AbCdEfGhIjKlMnOpQrStUvWx';
+
+  // 12.1 redact 必须遮蔽的 8 种形态
+  const mustHide = [
+    ['裸密钥', `error with ${FAKE_AK} inside`],
+    ['JSON 形式(驼峰)', `{"AccessKeyId":"${FAKE_AK}"}`],
+    ['JSON 形式(小写)', `{"accesskeyid":"${FAKE_AK}"}`],
+    ['中文前缀', `密钥 ${FAKE_AK} 无效`],
+    ['等号形式', `AccessKeyId=${FAKE_AK}`],
+    ['冒号形式', `Signature: ${FAKE_SK}`],
+    ['URL 参数', `https://x.com?a=1&AccessKeyId=${FAKE_AK}&b=2`],
+    ['Secret 裸串', `secret is ${FAKE_SK} ok`],
+  ];
+  for (const [label, input] of mustHide) {
+    const out = common.redact(input);
+    const leaked = out.includes(FAKE_AK) || out.includes(FAKE_SK);
+    check(`redact 遮蔽 ${label}`, !leaked, out);
+  }
+
+  // 12.2 sanitize 也必须遮蔽（因为它才是被发往 Telegram 的那个函数）
+  check('sanitize 遮蔽错误消息里的密钥',
+    !common.sanitize(`查询失败：AccessKeyId=${FAKE_AK}`).includes(FAKE_AK));
+  check('sanitize 保留 Markdown 清洗能力',
+    common.sanitize('my_server_01') === 'my server 01');
+
+  // 12.3 反向：绝不能误伤正常运维文本
+  const noHarm = [
+    '查询实例状态 失败：Invalid parameter: InstanceId',
+    '机器 i-5ts7fo7n0ui3stsujw0r 已关机',
+    '当前流量 12.34GB，本月免费额度 200GB',
+    '开机指令下发失败：Forbidden.RAM 权限不足',
+    '实例 my_server_01 巡检正常',
+    '账单金额 ¥12.34',
+    'SignatureDoesNotMatch 签名不匹配',
+    'RequestId: 8F3D2A1B-4C5E-6789-ABCD-EF0123456789',
+  ];
+  for (const s of noHarm) {
+    check(`redact 不误伤「${s.slice(0, 16)}…」`, common.redact(s) === s, common.redact(s));
+  }
+
+  // 12.4 幂等 + 无死循环（死循环在 Worker 里会 CPU 超时）
+  const once = common.sanitize(`AccessKeyId=${FAKE_AK}`);
+  check('sanitize 幂等（二次调用不变）', common.sanitize(once) === once);
+  const t0 = Date.now();
+  for (let i = 0; i < 10000; i++) {
+    common.sanitize(`AccessKeyId=${FAKE_AK}&Signature=${FAKE_SK}`);
+  }
+  check('sanitize 10000 次不死循环（<5s）', Date.now() - t0 < 5000, `${Date.now() - t0}ms`);
+
+  // 12.5 形态兜底正则本身必须能命中（防止「多重前瞻永不命中」这类静默失效）
+  const longMixed = 'AbCdEfGhIjKlMnOpQrStUvWx'; // 24 位、含大小写
+  check('长混合串兜底命中', common.redact(longMixed) === '[已隐藏]', common.redact(longMixed));
+  check('纯数字长串不误伤', common.redact('1234567890123456789012345') === '1234567890123456789012345');
+  check('纯小写长串不误伤', common.redact('abcdefghijklmnopqrstuvwxyz') === 'abcdefghijklmnopqrstuvwxyz');
+}
+
+// ---------------------------------------------------------------------------
+// 第 13 组：巡检软锁必须「双向互斥」（第五轮端到端排查固化）
+//   背景：早先只有 bot-listener 的手动巡检认锁，guard.runInspection 完全不认。
+//        于是「手动跑着 + 定时进来」会并行，状态互相覆盖（注释写的是互斥，实际没有）。
+//   现在锁只在 guard.runInspection 实现一次，手动/定时两条路共用。
+// ---------------------------------------------------------------------------
+{
+  console.log('第 13 组：巡检软锁双向互斥');
+  const guard = await import('../src/guard.js');
+
+  // 13.1 常量导出且键名正确（bot-listener 与 guard 必须用同一个键）
+  check('锁键名已导出为常量', guard.MANUAL_INSPECTION_LOCK === 'manual_inspection_lock');
+  check('锁窗口为 180 秒', guard.INSPECTION_LOCK_WINDOW === 180);
+
+  // 13.2 造一个「刚跑过」的状态，定时巡检必须跳过（不再只对多动）
+  const kv = new FakeKV();
+  const localEnv = { CDT_GUARD_KV: kv };
+  await common.saveConfig(localEnv, {
+    telegram: { chat_id: '1', admin_ids: ['1'] },
+    users: [{ name: '机器A', instance_id: 'i-a', region: 'ap-southeast-6', ak: 'x', sk: 'y', traffic_limit: 180 }],
+  });
+  // 手动写入一个「刚刚跑过」的锁（模拟另一条路径占用中）
+  await common.saveState(localEnv, {
+    [guard.MANUAL_INSPECTION_LOCK]: common.nowSeconds(),
+  });
+
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const body = JSON.stringify({ RequestId: 'x', Instances: { Instance: [{ Status: 'Running' }] } });
+    return { ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) };
+  };
+
+  const skipped = await guard.runInspection(localEnv);
+  check('3 分钟内已跑过 → 定时巡检跳过', skipped && skipped.skipped === true, JSON.stringify(skipped));
+  check('跳过时不检查任何机器', skipped && skipped.checked === 0);
+
+  // 13.3 force 可强行执行（用户主动点「立即巡检」时的语义）
+  const forced = await guard.runInspection(localEnv, { force: true });
+  check('force=true 时无视软锁照跑', forced && forced.skipped !== true, JSON.stringify(forced));
+
+  // 13.4 锁值随巡检一起写进去（不需要额外 KV 写入）
+  const st = await common.loadState(localEnv);
+  check('巡检后锁值已更新为本次时间', typeof st[guard.MANUAL_INSPECTION_LOCK] === 'number');
+
+  globalThis.fetch = realFetch2;
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(`===== 集成自检结果: 通过 ${pass} / 失败 ${fail} =====`);
 process.exit(fail === 0 ? 0 : 1);
