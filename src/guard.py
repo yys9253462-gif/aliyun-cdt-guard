@@ -70,6 +70,150 @@ def _fmt_balance(user):
         return ''
 
 
+def _fmt_money(amount, currency, default_symbol='$'):
+    """把金额格式化成带货币符号的字符串；无效值返回「查询失败」。"""
+    if amount is None or amount < 0:
+        return '查询失败'
+    symbol = {'CNY': '\u00a5', 'USD': '$'}.get(currency, default_symbol)
+    return '%s%.2f' % (symbol, amount)
+
+
+def _track_status_change(user, config, state, name, key, status, extra=''):
+    """监控实例状态变化，从「运行中」掉到「已停止」时立刻推送。
+
+    为什么要单独做这件事：
+        巡检每 5 分钟跑一次，而脚本默认行为是「流量安全 + 已停止 = 自动开机」。
+        如果实例是被别人（或系统）意外停掉的，自动开机虽然会救回来，
+        但如果不告诉你，你根本不知道机器曾经掉线过 —— 可能业务已经受影响。
+        所以这里在状态发生「运行中 -> 已停止」的切换那一刻就推一条消息。
+    """
+    record = state.setdefault(key, {})
+    previous = record.get('last_status')
+
+    # 首次见到这台机器只记状态，不报警（否则刚装完就报一堆「开机成功」的噪音）
+    if previous is None:
+        record['last_status'] = status
+        return
+
+    if previous != status:
+        record['last_status'] = status
+        LOG.info('[%s] 实例状态变化：%s -> %s', name, previous, status)
+
+        # 只在「运行中 -> 已停止」这个方向告警，这是业务受影响的方向。
+        # 反方向（已停止 -> 运行中）由 _try_start 的「已恢复运行」负责，不重复。
+        if previous == 'Running' and status == 'Stopped':
+            event_key = '%s:status_down' % key
+            if common.event_allowed(state, event_key, 'status_down', common.NOTIFY_COOLDOWN):
+                msg = ('机器: %s\n'
+                       '状态变化: 运行中 -> 已停止%s\n'
+                       '%s'
+                       '如果这不是你主动关的，说明实例被意外停机了。\n'
+                       '脚本会按现有规则处理（流量安全时自动开机）。'
+                       % (common.sanitize(name), extra,
+                          '说明: %s\n' % extra if extra else ''))
+                if send_alert(config, '实例已停止', msg, 'warn', LOG):
+                    common.mark_event(state, event_key, 'status_down')
+
+
+def _check_quota_progress(user, config, state, name, key, traffic_gb, region):
+    """免费额度进度提醒：用量跨过 80% / 95% 档位时各提醒一次。
+
+    为什么有用：
+        止损阈值是「你设的线」，而免费额度是「阿里云的钱包」。
+        两者不一定重合 —— 如果阈值设得比免费额度高，你会在阈值内就开始花钱。
+        所以在接近免费额度上限时提前打招呼，让你有时间决策。
+    """
+    if traffic_gb < 0:
+        return
+    free_gb = aliyun_api.get_free_quota_gb(region)
+    if free_gb <= 0:
+        return
+    percent = traffic_gb / free_gb * 100.0
+
+    for level in common.QUOTA_WARN_LEVELS:
+        if percent < level:
+            continue
+        event_key = '%s:quota_%d' % (key, level)
+        # 95% 档位一旦发过，就不再单独发 80% 的（避免同时补发两条）
+        if level == 80 and not common.event_allowed(
+                state, '%s:quota_95' % key, 'quota_95', common.QUOTA_COOLDOWN):
+            break
+        if not common.event_allowed(state, event_key, 'quota_%d' % level,
+                                    common.QUOTA_COOLDOWN):
+            continue
+        area = '非中国内地' if aliyun_api.is_overseas_region(region) else '中国内地'
+        remain = free_gb - traffic_gb
+        msg = ('机器: %s\n'
+               '本月已用流量: %.2f GB\n'
+               '免费额度: %.0f GB/月（%s）\n'
+               '已使用 %.1f%%，剩余 %.2f GB%s'
+               % (common.sanitize(name), traffic_gb, free_gb, area, percent, remain,
+                  '\n注意: 免费额度已用尽，继续跑将开始产生费用。' if remain <= 0 else ''))
+        level_name = '免费额度已用尽' if remain <= 0 else '免费额度即将用尽'
+        if send_alert(config, level_name, msg, 'warn' if level < 95 else 'danger', LOG):
+            common.mark_event(state, event_key, 'quota_%d' % level)
+
+
+def _check_money(user, config, state, name, key):
+    """余额过低 + 本月账单超支，两个跟钱有关的告警。
+
+    为什么合并在一起写：
+        两者都要查财务接口、都要按「账户货币」格式化、冷却时间也一样，
+        放一起能共用一次接口查询，少一次请求。
+    """
+    balance_limit = float(user.get('balance_limit', common.DEFAULT_BALANCE_LIMIT))
+    bill_limit = float(user.get('bill_limit', common.DEFAULT_BILL_LIMIT))
+
+    # --- 账户余额 ---
+    if balance_limit > 0:
+        try:
+            amount, currency = aliyun_api.get_account_balance(
+                user['ak'], user['sk'], user['region'], user.get('bill_endpoint', ''))
+        except Exception:
+            amount, currency = None, None
+
+        if amount is not None and amount < balance_limit:
+            event_key = '%s:balance_low' % key
+            if common.event_allowed(state, event_key, 'balance_low', common.MONEY_COOLDOWN):
+                msg = ('机器: %s\n'
+                       '当前账户余额: %s\n'
+                       '你设定的最低余额: %s\n'
+                       '%s'
+                       '余额不足会导致实例被停机、快照被释放，请及时充值。'
+                       % (common.sanitize(name),
+                          _fmt_money(amount, currency, user.get('currency', '$')),
+                          _fmt_money(balance_limit, currency, user.get('currency', '$')),
+                          '状态: 已欠费！\n' if amount < 0 else ''))
+                level = 'danger' if amount < 0 else 'warn'
+                title = '账户已欠费' if amount < 0 else '账户余额过低'
+                if send_alert(config, title, msg, level, LOG):
+                    common.mark_event(state, event_key, 'balance_low')
+
+    # --- 本月账单 ---
+    if bill_limit > 0:
+        try:
+            bill_amount, bill_currency = aliyun_api.get_instance_bill(
+                user['ak'], user['sk'], user['region'], user['instance_id'],
+                user.get('bill_endpoint', ''))
+        except Exception:
+            bill_amount, bill_currency = None, None
+
+        if bill_amount is not None and bill_amount >= 0 and bill_amount > bill_limit:
+            event_key = '%s:bill_over' % key
+            if common.event_allowed(state, event_key, 'bill_over', common.MONEY_COOLDOWN):
+                msg = ('机器: %s\n'
+                       '本月账单已产生: %s\n'
+                       '你设定的警戒线: %s\n'
+                       '账单金额已超过警戒线，通常意味着流量已进入付费阶梯，'
+                       '或者实例规格 / 磁盘产生了额外费用。\n'
+                       '建议去阿里云控制台「费用中心」核对明细。'
+                       % (common.sanitize(name),
+                          _fmt_money(bill_amount, bill_currency, user.get('currency', '$')),
+                          _fmt_money(bill_limit, bill_currency, user.get('currency', '$'))))
+                if send_alert(config, '本月账单超支', msg, 'warn', LOG):
+                    common.mark_event(state, event_key, 'bill_over')
+
+
 def check_one(user, config, state):
     """巡检单个实例。"""
     instance_id = user['instance_id']
@@ -111,6 +255,16 @@ def check_one(user, config, state):
 
         # 流量与状态都拿到了，说明监控是「睁眼」的，清掉失败计数
         common.clear_counter(state, key, 'check_failures')
+
+        # ---- 状态变化追踪（运行中 -> 已停止时报警）----
+        # 必须在决策之前记录，否则自动开机一执行，就永远看不到「掉线」那一瞬。
+        _track_status_change(user, config, state, name, key, status)
+
+        # ---- 免费额度进度提醒（80% / 95%）----
+        _check_quota_progress(user, config, state, name, key, traffic_gb, region)
+
+        # ---- 余额 / 账单告警 ----
+        _check_money(user, config, state, name, key)
 
         if traffic_gb < limit_gb:
             if status == 'Stopped':

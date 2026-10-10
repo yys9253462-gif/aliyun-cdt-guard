@@ -24,6 +24,18 @@ LOCK_FILE = os.path.join(BASE_DIR, 'guard.lock')
 NOTIFY_COOLDOWN = 3600
 # 流量超标提醒：24 小时只发一次
 OVERLIMIT_COOLDOWN = 86400
+# 账单超支 / 余额过低：6 小时只发一次（避免每小时都骚扰）
+MONEY_COOLDOWN = 21600
+# 免费额度进度提醒：同一档位（80% / 95%）在 24 小时内只发一次
+QUOTA_COOLDOWN = 86400
+
+# 免费额度进度提醒的触发档位（百分比）
+QUOTA_WARN_LEVELS = (80, 95)
+
+# 余额过低默认阈值（账户货币单位，可在 config.json 里按实例覆盖）
+DEFAULT_BALANCE_LIMIT = 10.0
+# 本月账单超支默认阈值（0 表示不启用账单告警）
+DEFAULT_BILL_LIMIT = 0.0
 
 # 时区（阿里云接口返回的时间按此时区解析；默认东八区）
 TIMEZONE_OFFSET_HOURS = 8
@@ -168,9 +180,14 @@ def redact(text):
 # 时区
 # ----------------------------------------------------------------------------
 def now_local():
-    """返回东八区的当前时间（阿里云控制台按东八区展示）。"""
+    """返回东八区的当前时间（阿里云控制台按东八区展示）。
+
+    用 timezone-aware 写法而不是 datetime.utcnow()——
+    后者在 Python 3.12 起已标记弃用，会在日志里刷一堆警告。
+    """
     import datetime
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    return (utc_now + datetime.timedelta(hours=TIMEZONE_OFFSET_HOURS)).replace(tzinfo=None)
 
 
 def current_billing_cycle():

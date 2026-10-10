@@ -14,6 +14,7 @@ echo -e "${YELLOW}即将卸载 CDT 流量守护。${NC}"
 echo "将会删除："
 echo "  - 每 5 分钟的巡检定时任务"
 echo "  - 每天 9:00 的报表定时任务"
+echo "  - Telegram 机器人常驻服务"
 echo "  - 程序目录 ${WORK_DIR}"
 echo ""
 echo -n "确认卸载吗？(y/n): "
@@ -31,11 +32,26 @@ if command -v crontab >/dev/null 2>&1; then
     echo -e "${GREEN}[完成]${NC} 定时任务已清除"
 fi
 
-# 2. 停掉可能残留的进程
+# 2. 停止并移除机器人常驻服务
+if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/cdt-bot.service ]; then
+    systemctl stop cdt-bot 2>/dev/null || true
+    systemctl disable cdt-bot 2>/dev/null || true
+    rm -f /etc/systemd/system/cdt-bot.service
+    systemctl daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}[完成]${NC} 机器人服务已移除（systemd）"
+elif command -v rc-service >/dev/null 2>&1 && [ -f /etc/init.d/cdt-bot ]; then
+    rc-service cdt-bot stop 2>/dev/null || true
+    rc-update del cdt-bot default 2>/dev/null || true
+    rm -f /etc/init.d/cdt-bot
+    echo -e "${GREEN}[完成]${NC} 机器人服务已移除（OpenRC）"
+fi
+
+# 3. 停掉可能残留的进程
 pkill -f "${WORK_DIR}/guard.py" 2>/dev/null || true
 pkill -f "${WORK_DIR}/report.py" 2>/dev/null || true
+pkill -f "${WORK_DIR}/bot_listener.py" 2>/dev/null || true
 
-# 3. 删除程序目录
+# 4. 删除程序目录
 if [ -d "$WORK_DIR" ]; then
     rm -rf "$WORK_DIR"
     echo -e "${GREEN}[完成]${NC} 程序目录已删除"

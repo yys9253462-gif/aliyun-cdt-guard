@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 venv/
+.venv-test/
 config.json
 state.json
 *.log
+bot.lock
+guard.lock

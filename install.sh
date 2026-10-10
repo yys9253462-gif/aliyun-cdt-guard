@@ -143,7 +143,7 @@ setup_python_env() {
 
 download_sources() {
     step "第 3 步 / 共 5 步：下载运行程序"
-    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py; do
+    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "${REPO_RAW}/${file}" -o "${WORK_DIR}/${file}" || {
                 error "下载 ${file} 失败，请检查网络能否访问 GitHub。"
@@ -431,6 +431,16 @@ collect_one_instance() {
     echo "【资源组 ID】仅当你的 RAM 用户被限制在某个资源组内时才需要填，否则直接回车。"
     RESGROUP=$(ask "资源组 ID（可留空）")
 
+    echo ""
+    echo "【余额过低提醒】账户余额低于这个数字就发告警，防止欠费被停机。"
+    echo -e "  ${CYAN}按上面的货币单位填写，直接回车用默认值 10。填 0 表示关闭这项提醒。${NC}"
+    BALANCE_LIMIT=$(ask "最低余额警戒线" "10")
+
+    echo ""
+    echo "【本月账单超支提醒】本月账单超过这个数字就发告警。"
+    echo -e "  ${CYAN}直接回车表示关闭（推荐先关闭，等你摸清正常花费再打开）。${NC}"
+    BILL_LIMIT=$(ask "账单警戒线（0 表示关闭）" "0")
+
     NEW_USER=$(cat <<EOF
 {
     "name": "${NAME}",
@@ -439,6 +449,8 @@ collect_one_instance() {
     "region": "${REGION}",
     "instance_id": "${INSTANCE}",
     "traffic_limit": ${LIMIT},
+    "balance_limit": ${BALANCE_LIMIT},
+    "bill_limit": ${BILL_LIMIT},
     "bill_endpoint": "${BILL_ENDPOINT}",
     "currency": "${CURRENCY}",
     "resgroup": "${RESGROUP}",
@@ -523,6 +535,130 @@ setup_cron() {
     fi
 }
 
+# ------------------------------ 机器人常驻服务 ------------------------------
+# 把 bot_listener.py 注册成开机自启、崩溃自动重启的常驻服务。
+# 为什么需要它：交互式菜单必须有一个进程一直「在听」你发消息，
+# 而 cron 跑完就退出，做不到这件事。
+setup_bot_service() {
+    step "配置 Telegram 机器人常驻服务"
+    local python_bin="${VENV_DIR}/bin/python"
+
+    # 没配 Telegram 就没必要装这个服务
+    local tg_token
+    tg_token=$(python3 -c "
+import json
+with open('$CONFIG_FILE','r',encoding='utf-8') as fp:
+    print((json.load(fp).get('telegram') or {}).get('bot_token',''))
+" 2>/dev/null)
+
+    if [ -z "$tg_token" ]; then
+        warn "没有配置 Telegram Bot Token，跳过机器人服务。"
+        warn "配置好 Telegram 后，在管理菜单选第 10 项即可安装机器人菜单。"
+        return
+    fi
+
+    local os_type
+    os_type=$(detect_os)
+
+    if [ "$os_type" = "alpine" ]; then
+        # Alpine 用 OpenRC
+        cat > /etc/init.d/cdt-bot <<EOF
+#!/sbin/openrc-run
+name="cdt-bot"
+description="阿里云 CDT 流量守护 Telegram 机器人"
+command="${python_bin}"
+command_args="${WORK_DIR}/bot_listener.py"
+command_background=true
+pidfile="/run/cdt-bot.pid"
+output_log="${WORK_DIR}/bot.log"
+error_log="${WORK_DIR}/bot.log"
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+        chmod +x /etc/init.d/cdt-bot
+        rc-update add cdt-bot default >/dev/null 2>&1 || true
+        rc-service cdt-bot restart >/dev/null 2>&1 || rc-service cdt-bot start >/dev/null 2>&1 || true
+    else
+        # systemd 系（Debian / Ubuntu / CentOS 等）
+        cat > /etc/systemd/system/cdt-bot.service <<EOF
+[Unit]
+Description=阿里云 CDT 流量守护 Telegram 机器人
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${python_bin} ${WORK_DIR}/bot_listener.py
+WorkingDirectory=${WORK_DIR}
+Restart=always
+RestartSec=10
+StandardOutput=append:${WORK_DIR}/bot.log
+StandardError=append:${WORK_DIR}/bot.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable cdt-bot >/dev/null 2>&1 || true
+        systemctl restart cdt-bot >/dev/null 2>&1 || true
+    fi
+
+    sleep 3
+    if bot_service_running; then
+        info "机器人已启动。打开 Telegram 给机器人发 /menu 试试。"
+    else
+        warn "机器人服务已安装，但似乎没有正常运行。"
+        warn "查看日志：tail -n 30 ${WORK_DIR}/bot.log"
+        warn "常见原因：本机连不上 api.telegram.org（需要代理），"
+        warn "或另一个机器人进程还在跑（同一个 Bot 不能开两个）。"
+    fi
+}
+
+# 判断机器人服务是否在运行，返回 0 表示在跑
+bot_service_running() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cdt-bot 2>/dev/null; then
+        return 0
+    fi
+    if command -v rc-service >/dev/null 2>&1 && rc-service cdt-bot status 2>/dev/null | grep -q started; then
+        return 0
+    fi
+    # 兜底：看进程在不在（有些精简系统没有服务管理器）
+    if command -v pgrep >/dev/null 2>&1 && pgrep -f "bot_listener.py" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# 停止 / 重启机器人服务
+bot_service_ctl() {
+    local action="$1"
+    if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/cdt-bot.service ]; then
+        systemctl "$action" cdt-bot 2>/dev/null
+        return $?
+    fi
+    if command -v rc-service >/dev/null 2>&1 && [ -f /etc/init.d/cdt-bot ]; then
+        rc-service cdt-bot "$action" 2>/dev/null
+        return $?
+    fi
+    # 没有服务管理器时直接操作进程
+    case "$action" in
+        stop)
+            pkill -f "bot_listener.py" 2>/dev/null || true
+            ;;
+        restart)
+            pkill -f "bot_listener.py" 2>/dev/null || true
+            sleep 2
+            nohup "${VENV_DIR}/bin/python" "${WORK_DIR}/bot_listener.py" >> "${WORK_DIR}/bot.log" 2>&1 &
+            ;;
+    esac
+    return 0
+}
+
 # ------------------------------ 自检 ------------------------------
 self_test() {
     step "安装完成，正在自检"
@@ -530,7 +666,7 @@ self_test() {
 
     echo "1) 检查程序文件..."
     local missing=0
-    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py; do
+    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
         if [ ! -s "${WORK_DIR}/${file}" ]; then
             error "缺少文件 ${file}"
             missing=1
@@ -645,10 +781,13 @@ manage_menu() {
         echo " 7) 立即执行一次巡检"
         echo " 8) 查看最近日志"
         echo " 9) 退出"
+        echo -e "${CYAN} 10) 安装 / 重启 Telegram 机器人菜单${NC}"
+        echo -e "${CYAN} 11) 查看机器人运行状态与日志${NC}"
+        echo -e "${CYAN} 12) 修改某台机器的告警阈值${NC}"
         echo -e "${BOLD}${GREEN}===========================================${NC}"
 
         local opt
-        opt=$(ask "请输入序号 1-9")
+        opt=$(ask "请输入序号 1-12")
         case "$opt" in
             1) list_instances ;;
             2)
@@ -733,6 +872,26 @@ with open(path, "w", encoding="utf-8") as fp:
     json.dump(data, fp, ensure_ascii=False, indent=4)
 PY
                 info "通知配置已更新"
+                # 机器人常驻进程只在启动时读一次 Token，改了配置必须重启才生效
+                if bot_service_running; then
+                    echo ""
+                    if confirm "检测到机器人正在运行，需要重启它才能读到新配置，现在重启？"; then
+                        bot_service_ctl restart
+                        sleep 3
+                        if bot_service_running; then
+                            info "机器人已重启，新配置已生效"
+                        else
+                            warn "机器人重启失败，请到菜单第 11 项查看日志"
+                        fi
+                    else
+                        warn "已跳过重启。机器人仍在用旧配置，建议稍后到菜单第 10 项重启。"
+                    fi
+                elif [ -n "${TG_TOKEN:-}" ]; then
+                    echo ""
+                    if confirm "检测到刚配置了 Telegram，是否顺便安装机器人菜单？"; then
+                        setup_bot_service
+                    fi
+                fi
                 ;;
             6) "${VENV_DIR}/bin/python" "${WORK_DIR}/report.py" ;;
             7) "${VENV_DIR}/bin/python" "${WORK_DIR}/guard.py" && info "巡检执行完毕" ;;
@@ -744,7 +903,77 @@ PY
                 fi
                 ;;
             9) info "已退出"; exit 0 ;;
-            *) error "输入无效，请输入 1-9 之间的数字" ;;
+            10)
+                setup_bot_service
+                ;;
+            11)
+                echo ""
+                if bot_service_running; then
+                    info "机器人正在运行"
+                else
+                    warn "机器人当前没有运行"
+                fi
+                echo ""
+                echo "最近 30 行机器人日志："
+                if [ -f "${WORK_DIR}/bot.log" ]; then
+                    tail -n 30 "${WORK_DIR}/bot.log"
+                else
+                    warn "还没有日志，可能是机器人从未启动过"
+                fi
+                echo ""
+                if confirm "需要重启机器人吗？"; then
+                    bot_service_ctl restart
+                    sleep 3
+                    if bot_service_running; then
+                        info "已重启，机器人运行中"
+                    else
+                        warn "重启后仍未运行，请检查上面的日志"
+                    fi
+                fi
+                ;;
+            12)
+                list_instances
+                local idx
+                idx=$(ask "输入要修改的编号（直接回车取消）")
+                if [ -n "$idx" ]; then
+                    local new_traffic
+                    new_traffic=$(ask "新的流量关机阈值（GB，直接回车保持原值）")
+                    local new_balance
+                    new_balance=$(ask "新的余额过低警戒线（直接回车保持原值，填 0 关闭）")
+                    local new_bill
+                    new_bill=$(ask "新的账单超支警戒线（直接回车保持原值，填 0 关闭）")
+                    IDX="$idx" NEW_TRAFFIC="$new_traffic" NEW_BALANCE="$new_balance" \
+                    NEW_BILL="$new_bill" CONFIG_FILE="$CONFIG_FILE" python3 - <<'PY'
+import json, os
+path = os.environ["CONFIG_FILE"]
+with open(path, "r", encoding="utf-8") as fp:
+    data = json.load(fp)
+try:
+    user = data["users"][int(os.environ["IDX"])]
+    changed = []
+    if os.environ["NEW_TRAFFIC"].strip():
+        user["traffic_limit"] = float(os.environ["NEW_TRAFFIC"])
+        changed.append("流量阈值 -> %.0fGB" % user["traffic_limit"])
+    if os.environ["NEW_BALANCE"].strip():
+        user["balance_limit"] = float(os.environ["NEW_BALANCE"])
+        changed.append("余额警戒线 -> %.2f" % user["balance_limit"])
+    if os.environ["NEW_BILL"].strip():
+        user["bill_limit"] = float(os.environ["NEW_BILL"])
+        changed.append("账单警戒线 -> %.2f" % user["bill_limit"])
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=4)
+    print("   已更新 %s：" % user.get("name"))
+    for item in changed:
+        print("     · %s" % item)
+    if not changed:
+        print("     （没有填写任何新值，未做修改）")
+except Exception:
+    print("   编号无效，操作取消")
+PY
+                    info "阈值修改完成"
+                fi
+                ;;
+            *) error "输入无效，请输入 1-12 之间的数字" ;;
         esac
     done
 }
@@ -784,11 +1013,17 @@ main() {
         collect_instances
         setup_cron
         self_test
+        setup_bot_service
 
         echo ""
         echo -e "${GREEN}${BOLD}安装全部完成！${NC}"
         echo "下次想改配置，只要再运行一次本脚本即可进入管理菜单。"
         echo ""
+        if bot_service_running; then
+            echo -e "${BOLD}${CYAN}现在打开 Telegram，给你的机器人发一句话：/menu${NC}"
+            echo "它会把控制台菜单推给你，以后手机上就能管机器了。"
+            echo ""
+        fi
     fi
 }
 
