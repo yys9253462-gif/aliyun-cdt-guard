@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import common
 import aliyun_api
+import account_summary
 from notifier import send_report
 
 LOG = common.build_logger('cdt_report', os.path.join(common.BASE_DIR, 'report.log'), stream=True)
@@ -111,6 +112,17 @@ def build_report(config):
         lines.append('')
 
     lines.append('提示: 流量达到阈值会自动关机止损，次月流量重置后自动开机。')
+
+    # 按账号再汇总一遍。为什么放在最后：
+    # 逐台看是「明细」，按账号看是「总账」。免费额度是按账号算的，
+    # 多台机器共享一份额度，只看明细容易误判「每台都安全」。
+    # 只有 2 个以上账号时才有必要展示 —— 单个账号的汇总与明细完全重复。
+    if len(account_summary.group_by_account(users)) >= 2:
+        lines.append('')
+        lines.append('-' * 30)
+        lines.append('')
+        lines.append(account_summary.build_summary_text(config, LOG))
+
     return '\n'.join(lines)
 
 

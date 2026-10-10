@@ -214,8 +214,8 @@ class TestBot(unittest.TestCase):
     # ---------------- 菜单构建 ----------------
     def test_菜单按钮数与机器数对应(self):
         kb = bot.main_menu_keyboard(self.config)
-        # 每台机器一行 + 两行功能按钮 = 4 行
-        self.assertEqual(len(kb), 4, '两台机器应有 4 行按钮')
+        # 每台机器一行 + 三行功能按钮（额度/报表、账号汇总/周报、巡检/说明）= 5 行
+        self.assertEqual(len(kb), 5, '两台机器应有 5 行按钮')
 
     def test_callback_data_不超64字节(self):
         """超长会导致整个键盘被 Telegram 拒绝，必须卡死在这里。"""
@@ -234,8 +234,8 @@ class TestBot(unittest.TestCase):
                 'users': [{'name': 'M%d' % i, 'instance_id': 'i-%019d' % i}
                           for i in range(20)]}
         kb = bot.main_menu_keyboard(many)
-        # 8 台机器 + 2 行功能 = 10 行
-        self.assertEqual(len(kb), 10)
+        # 8 台机器 + 3 行功能 = 11 行
+        self.assertEqual(len(kb), 11)
 
     def test_暂停机器按钮显示已暂停(self):
         kb = bot.main_menu_keyboard(self.config)

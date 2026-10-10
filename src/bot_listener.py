@@ -105,14 +105,42 @@ def _api(token, method, payload=None, timeout=HTTP_TIMEOUT):
         return None
 
 
+def _markdown_safe(text):
+    """粗判文本能否安全用 Markdown 解析，避免白白浪费一次请求。
+
+    为什么要做这个判断：
+        Telegram 的 Markdown 里 `*` `_` `[` 都是标记，
+        一旦**出现奇数个**（没配对），整条消息会被拒
+        （报 "can't parse entities"），我们只能降级纯文本重发。
+        虽然降级能兜住，但会白跑一次请求，还在日志里留下 WARNING 噪音。
+
+        这里只做**保守**判断：星号与反引号必须成偶数个才算安全。
+        宁可误判为不安全（退回纯文本，消息照样能发出去），
+        也不要误判为安全（那就直接报错重发了）。
+    """
+    if not text:
+        return True
+    if text.count('*') % 2 != 0:
+        return False
+    if text.count('`') % 2 != 0:
+        return False
+    # 中括号是 Markdown 链接语法，单独出现也容易踩坑
+    if text.count('[') != text.count(']'):
+        return False
+    return True
+
+
 def send_text(token, chat_id, text, keyboard=None):
     """发送消息。keyboard 为内联键盘按钮定义（长在消息气泡里的那种）。"""
-    payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'}
+    payload = {'chat_id': chat_id, 'text': text}
+    if _markdown_safe(text):
+        payload['parse_mode'] = 'Markdown'
     if keyboard:
         payload['reply_markup'] = {'inline_keyboard': keyboard}
     result = _api(token, 'sendMessage', payload)
-    if result is None:
-        # Markdown 解析失败（实例名里带特殊字符）时降级为纯文本重发
+    if result is None and 'parse_mode' in payload:
+        # 极少数漏网情况（例如正文里混进了未转义的特殊字符）
+        # 再降级为纯文本重发一次，确保消息一定发得出去
         payload.pop('parse_mode', None)
         result = _api(token, 'sendMessage', payload)
     return result is not None
@@ -138,16 +166,17 @@ def send_menu(token, chat_id, text, rows, placeholder='点下面的按钮操作'
     payload = {
         'chat_id': chat_id,
         'text': text,
-        'parse_mode': 'Markdown',
         'reply_markup': {
             'keyboard': keyboard,
             'resize_keyboard': True,      # 按内容自适应高度，不占半屏
             'is_persistent': True,        # 一直显示，不用每次点图标展开
         },
     }
+    if _markdown_safe(text):
+        payload['parse_mode'] = 'Markdown'
     result = _api(token, 'sendMessage', payload)
-    if result is None:
-        # Markdown 解析失败（机器名带下划线等）时降级纯文本重发
+    if result is None and 'parse_mode' in payload:
+        # Markdown 解析失败时降级纯文本重发，保证菜单一定弹得出来
         payload.pop('parse_mode', None)
         result = _api(token, 'sendMessage', payload)
     return result is not None
@@ -180,6 +209,7 @@ def register_commands(token):
         {'command': 'status', 'description': '查看所有机器实时状态'},
         {'command': 'traffic', 'description': '查看流量与免费额度'},
         {'command': 'balance', 'description': '查看账户余额与本月账单'},
+        {'command': 'accounts', 'description': '按账号汇总流量与额度'},
         {'command': 'weekly', 'description': '查看本周流量周报'},
         {'command': 'report', 'description': '立即发送完整报表'},
         {'command': 'run', 'description': '立即执行一次巡检'},
@@ -430,6 +460,12 @@ def build_weekly(config):
     return '\n'.join(lines)
 
 
+def build_accounts(config):
+    """按账号汇总 —— 免费额度是按账号算的，这个视角比逐台看更准。"""
+    import account_summary
+    return account_summary.build_summary_text(config, LOG)
+
+
 def toggle_pause(config, instance_id):
     """暂停 / 恢复某台机器的监控。返回结果说明文本。"""
     user = _find_user(config, instance_id)
@@ -545,14 +581,20 @@ def main_menu_rows():
 
     布局刻意做成两列 —— 截图里那种整齐的方格观感，
     而且两列宽度比三列更宽松，中文按钮不会挤在一起换行。
+
+    13 项排成 7 行（最后一行 1 个）：
+        第 6 行放「账号汇总」与「立即巡检」，
+        第 7 行单独放「收起菜单」——
+        把收起放最后一行单独一格，是避免你手滑点到它。
     """
     return [
         [L.LBL_OVERVIEW, L.LBL_TRAFFIC],
         [L.LBL_STATUS, L.LBL_REPORT],
         [L.LBL_WEEKLY, L.LBL_BALANCE],
+        [L.LBL_ACCOUNTS, L.LBL_DEVICES],
         [L.LBL_START_ALL, L.LBL_STOP_ALL],
-        [L.LBL_DEVICES, L.LBL_RUN],
-        [L.LBL_HELP, L.LBL_HIDE],
+        [L.LBL_RUN, L.LBL_HELP],
+        [L.LBL_HIDE],
     ]
 
 
@@ -596,6 +638,10 @@ def main_menu_keyboard(config):
         {'text': '发送报表', 'callback_data': 'report'},
     ])
     rows.append([
+        {'text': '账号汇总', 'callback_data': 'accounts'},
+        {'text': '流量周报', 'callback_data': 'weekly'},
+    ])
+    rows.append([
         {'text': '立即巡检', 'callback_data': 'run'},
         {'text': '使用说明', 'callback_data': 'help'},
     ])
@@ -619,10 +665,16 @@ HELP_TEXT = """*CDT 流量守护 · 使用说明*
 /status  查看所有机器实时状态
 /traffic 查看流量与免费额度
 /balance 查看账户余额与本月账单
+/accounts 按账号汇总流量与额度
 /weekly  查看最近 7 天流量周报
 /report  立即发送完整报表
 /run     立即执行一次巡检
 /help    显示本条说明
+
+*关于「账号汇总」*
+免费额度是**按账号**算的，一个账号下多台机器共享一份额度。
+所以「账号汇总」这一页比逐台看更准 ——
+它会把同一个 AccessKey 的机器合并计算，告诉你这个账号额度还剩多少。
 
 *注意*
 · 界面文字不带任何英文，全部中文。
@@ -685,6 +737,9 @@ def handle_command(config, token, chat_id, text):
         send_text(token, chat_id, build_balance(config))
     elif cmd == 'weekly':
         send_text(token, chat_id, build_weekly(config))
+    elif cmd == 'accounts':
+        send_text(token, chat_id, '正在按账号汇总，可能需要十几秒...')
+        send_text(token, chat_id, build_accounts(config))
     elif cmd == 'report':
         _send_report(config, token, chat_id)
     elif cmd == 'run':
@@ -771,6 +826,10 @@ def handle_plain_text(config, token, chat_id, text):
     if L.match_main(raw, L.LBL_BALANCE):
         send_text(token, chat_id, '正在查询余额与账单，可能需要十几秒...')
         send_text(token, chat_id, build_balance(config))
+        return
+    if L.match_main(raw, L.LBL_ACCOUNTS):
+        send_text(token, chat_id, '正在按账号汇总，可能需要十几秒...')
+        send_text(token, chat_id, build_accounts(config))
         return
     if L.match_main(raw, L.LBL_START_ALL):
         send_text(token, chat_id, do_batch_power(config, 'start'))
@@ -939,6 +998,10 @@ def _dispatch_callback(config, token, callback):
     elif action == 'weekly':
         answer_callback(token, callback_id, '正在汇总周报...')
         send_text(token, chat_id, build_weekly(config))
+
+    elif action == 'accounts':
+        answer_callback(token, callback_id, '正在按账号汇总...')
+        send_text(token, chat_id, build_accounts(config))
 
     elif action == 'menu':
         answer_callback(token, callback_id)

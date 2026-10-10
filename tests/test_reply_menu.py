@@ -217,10 +217,12 @@ class TestReplyMenu(unittest.TestCase):
         self.assertLessEqual(len(L.parse_device_button(btn)), L.DEVICE_NAME_MAX)
 
     # ---------------- 菜单结构 ----------------
-    def test_主菜单是6行2列(self):
+    def test_主菜单是7行2列(self):
+        """13 项排 7 行：前 6 行各 2 个，「收起菜单」单独占第 7 行。"""
         rows = bot.main_menu_rows()
-        self.assertEqual(len(rows), 6, '主菜单应为 6 行')
-        for row in rows:
+        self.assertEqual(len(rows), 7, '主菜单应为 7 行')
+        self.assertEqual(len(rows[-1]), 1, '最后一行只放「收起菜单」一项')
+        for row in rows[:-1]:
             self.assertEqual(len(row), 2, '主菜单每行应为 2 列')
 
     def test_一行不超过3个(self):
@@ -250,6 +252,17 @@ class TestReplyMenu(unittest.TestCase):
         self.assertIn(L.LBL_WEEKLY, flat, '主菜单应有周报')
         self.assertIn(L.LBL_BALANCE, flat, '主菜单应有余额详情')
 
+    def test_主菜单含账号汇总(self):
+        flat = [t for row in bot.main_menu_rows() for t in row]
+        self.assertIn(L.LBL_ACCOUNTS, flat, '主菜单应有账号汇总')
+
+    def test_一级标签含账号汇总且不重复(self):
+        labels = [L.LBL_OVERVIEW, L.LBL_TRAFFIC, L.LBL_STATUS, L.LBL_REPORT,
+                  L.LBL_WEEKLY, L.LBL_BALANCE, L.LBL_ACCOUNTS, L.LBL_START_ALL,
+                  L.LBL_STOP_ALL, L.LBL_DEVICES, L.LBL_RUN, L.LBL_HELP, L.LBL_HIDE]
+        self.assertEqual(len(labels), len(set(labels)), '一级菜单标签有重复')
+        self.assertEqual(len(labels), 13, '一级菜单应为 13 项')
+
     # ---------------- 文字翻译 ----------------
     def _send(self, text, chat_id=MY_CHAT_ID):
         bot.handle_plain_text(self.config, 'tok', chat_id, text)
@@ -274,6 +287,10 @@ class TestReplyMenu(unittest.TestCase):
     def test_点余额详情有回复(self):
         self._send(L.LBL_BALANCE)
         self.assertTrue(self.texts, '点余额详情应有回复（含查询中提示）')
+
+    def test_点账号汇总有回复(self):
+        self._send(L.LBL_ACCOUNTS)
+        self.assertTrue(self.texts, '点账号汇总应有回复（含查询中提示）')
 
     def test_点单机操作出实例列表(self):
         self._send(L.LBL_DEVICES)
@@ -365,6 +382,39 @@ class TestReplyMenu(unittest.TestCase):
     def test_本人点批量关机有反馈(self):
         self._send(L.LBL_STOP_ALL)
         self.assertTrue(self.texts or self.menus, '批量关机应有反馈')
+
+    # ---------------- Markdown 安全性预判 ----------------
+    def test_星号配对判定安全(self):
+        """成对的 * 是合法加粗，可以带 parse_mode 发。"""
+        self.assertTrue(bot._markdown_safe('*标题*\n正文'))
+        self.assertTrue(bot._markdown_safe('没有标记的纯文本'))
+
+    def test_星号不配对判不安全(self):
+        """奇数个 * 会让 Telegram 拒绝整条消息（can't parse entities）。
+
+        实测踩过：发验收消息时文案里 * 没配对，导致 4 次 400 错误。
+        虽然能降级重发，但会白跑一次请求并在日志里刷 WARNING。
+        """
+        self.assertFalse(bot._markdown_safe('这里有 * 一个孤零零的星号'))
+        self.assertFalse(bot._markdown_safe('*开始加粗但没有结束'))
+
+    def test_反引号不配对判不安全(self):
+        self.assertFalse(bot._markdown_safe('代码 ` 未闭合'))
+
+    def test_中括号不配对判不安全(self):
+        self.assertFalse(bot._markdown_safe('[链接没闭合'))
+
+    def test_空文本判安全(self):
+        self.assertTrue(bot._markdown_safe(''))
+        self.assertTrue(bot._markdown_safe(None))
+
+    def test_真实菜单文案全部通过安全判定(self):
+        """本项目的所有内置文案都必须能过安全判定 ——
+        否则每条消息都要白跑一次请求才发出，日志会被 WARNING 刷满。
+        """
+        self.assertTrue(bot._markdown_safe(bot.HELP_TEXT), '帮助文案含不配对的标记')
+        self.assertTrue(bot._markdown_safe(bot.build_status(self.config)))
+        self.assertTrue(bot._markdown_safe(bot.build_traffic(self.config)))
 
 
 if __name__ == '__main__':

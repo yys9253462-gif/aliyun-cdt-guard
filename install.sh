@@ -143,7 +143,7 @@ setup_python_env() {
 
 download_sources() {
     step "第 3 步 / 共 5 步：下载运行程序"
-    for file in common.py menu_labels.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
+    for file in common.py menu_labels.py account_summary.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "${REPO_RAW}/${file}" -o "${WORK_DIR}/${file}" || {
                 error "下载 ${file} 失败，请检查网络能否访问 GitHub。"
@@ -666,7 +666,7 @@ self_test() {
 
     echo "1) 检查程序文件..."
     local missing=0
-    for file in common.py menu_labels.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
+    for file in common.py menu_labels.py account_summary.py notifier.py aliyun_api.py guard.py report.py list_instances.py bot_listener.py; do
         if [ ! -s "${WORK_DIR}/${file}" ]; then
             error "缺少文件 ${file}"
             missing=1

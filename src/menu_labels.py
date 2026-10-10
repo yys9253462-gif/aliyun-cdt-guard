@@ -23,6 +23,7 @@ LBL_STATUS = '\U0001f4e1 实例状态'             # 📡
 LBL_REPORT = '\U0001f4cb 完整报表'             # 📋
 LBL_WEEKLY = '\U0001f4c5 周报'                # 📅
 LBL_BALANCE = '\U0001f4b0 余额详情'            # 💰
+LBL_ACCOUNTS = '\U0001f3e6 账号汇总'           # 🏦
 LBL_START_ALL = '\U0001f680 全部开机'          # 🚀
 LBL_STOP_ALL = '\U0001f6d1 全部关机'           # 🛑
 LBL_DEVICES = '\u2699\ufe0f 单机操作'          # ⚙️
