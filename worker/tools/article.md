@@ -130,8 +130,8 @@
 
 ## 七、下载
 
-安装包：https://pan.ailxw.com/pickup/50828
+安装包：https://pan.ailxw.com/pickup/15117
 
-取件码：`50828`
+取件码：`15117`
 
 包里有 README 和中文部署指南，遇到问题先翻这两份。
