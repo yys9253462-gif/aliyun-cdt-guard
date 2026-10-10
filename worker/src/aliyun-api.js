@@ -65,6 +65,72 @@ const OVERSEAS_PREFIXES = ['ap-', 'us-', 'eu-', 'me-', 'na-', 'sa-', 'cn-hongkon
 const RETRY_TIMES = 3;
 const RETRY_DELAY_MS = 2000;
 
+// ---------------------------------------------------------------------------
+// 子请求预算保护（B5）
+// ---------------------------------------------------------------------------
+/**
+ * 免费版 Worker 单次请求最多只能发起 **50 个子请求**（subrequest）。
+ * 超过就直接抛错，整个请求失败 —— 最坏的结果是「一轮巡检跑到一半崩掉，
+ * 前面的结果全丢，用户在机器人里什么回执都收不到」。
+ *
+ * 为什么很容易撞上这个上限：
+ *     每次阿里云接口调用都是 1 个子请求，而 requestWithRetry 最多重试 3 次。
+ *     单台机器一轮正常要查：流量 + 实例状态 + 本月账单 = 3 次；
+ *     只要接口开始抖动（阿里云偶发超时是常态），每项都变成 3 次 = 9 次。
+ *     再算上给 Telegram 发消息也占子请求，**四五台机器就足以打满 50**。
+ *
+ * 所以这里做「预算保护」，策略是**宁可少查几台，也不能整轮崩掉**：
+ *   · 每次真正发起请求前先检查预算是否还够；
+ *   · 预算不足时，直接让本次调用返回「查不到」而不是继续发请求 ——
+ *     调用方本来就处理了「查不到」的情况（显示查询失败），
+ *     所以降级是平滑的，不会产生新错误；
+ *   · 单个接口本来要重试 3 次，预算紧张时只重试 1 次，
+ *     把重试的机会让给后面的机器 —— 让尽可能多的机器被检查到。
+ *
+ * 上限取 42 而不是 50，是给「已发生但未计数」的请求留缓冲：
+ * 账单查询内部可能走多个端点、Telegram 发送也占额度，
+ * 留 8 个的余量能避免预算刚好卡在边界时被 Cloudflare 判超限。
+ */
+const SUBREQUEST_BUDGET = 42;
+
+/** 当前请求已消耗的子请求数（模块级，生命周期 = 一次请求） */
+let subrequestUsed = 0;
+
+/** 重置子请求计数。每次巡检开始和测试用例开始时调用。 */
+export function resetSubrequestCount() {
+  subrequestUsed = 0;
+}
+
+/** 读取当前已消耗的子请求数（日志与测试用） */
+export function getSubrequestCount() {
+  return subrequestUsed;
+}
+
+/** 预算是否已耗尽（外部据此决定是否提前收尾） */
+export function isSubrequestBudgetExhausted() {
+  return subrequestUsed >= SUBREQUEST_BUDGET;
+}
+
+/**
+ * 申请一次子请求额度。够则放行并计数，不够则返回 false。
+ * @param {number} cost 本次要发起的请求数（重试时按实际要发的次数传）
+ */
+function acquireSubrequest(cost = 1) {
+  if (subrequestUsed + cost > SUBREQUEST_BUDGET) {
+    return false;
+  }
+  subrequestUsed += cost;
+  return true;
+}
+
+/** 预算不足时抛出的错误 —— 与「接口报错」区分开，便于日志说明原因 */
+export class BudgetExhaustedError extends Error {
+  constructor(message = '本轮巡检的子请求预算已用完') {
+    super(message);
+    this.name = 'BudgetExhaustedError';
+  }
+}
+
 /** 接口错误：带上阿里云返回的原始原因，便于日志与告警展示 */
 export class ApiError extends Error {
   constructor(message) {
@@ -160,8 +226,21 @@ function isTransient(parsed, httpStatus) {
  * 巡检每 5 分钟一次，中间抖一下不该让整轮失败。
  */
 async function requestWithRetry(options, retries = RETRY_TIMES) {
+  // 预算不足时**根本不再发起请求**，直接抛 BudgetExhaustedError。
+  // 调用方要么自己 catch 成「查不到」，要么让外层把本轮标记为「预算用完」，
+  // 无论哪种都不会让 Worker 抛 subrequest 超限的致命错误。
+  if (!acquireSubrequest(1)) {
+    throw new BudgetExhaustedError();
+  }
+
+  // 预算紧张时主动降低重试次数：把剩下的额度留给还没被检查的机器。
+  // 判断依据是「按最坏情况（每项 3 次）还能撑几台」，够 2 台就正常重试，
+  // 否则退化成不重试 —— 少查一次总比整轮崩掉强。
+  const remaining = SUBREQUEST_BUDGET - subrequestUsed;
+  const effectiveRetries = remaining >= 6 ? retries : 1;
+
   let lastResult = null;
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
+  for (let attempt = 1; attempt <= effectiveRetries; attempt += 1) {
     try {
       const result = await doRequest(options);
       lastResult = result;
@@ -171,7 +250,11 @@ async function requestWithRetry(options, retries = RETRY_TIMES) {
     } catch (error) {
       lastResult = { httpStatus: 0, parsed: null, raw: String(error && error.message) };
     }
-    if (attempt < retries) {
+    if (attempt < effectiveRetries) {
+      // 重试也要先申请额度，申请不到就到此为止（留着给后面的机器）
+      if (!acquireSubrequest(1)) {
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
@@ -427,13 +510,68 @@ export async function rebootInstance(accessKeyId, accessKeySecret, region, insta
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// 余额查询的请求级去重（B8）
+// ---------------------------------------------------------------------------
+/**
+ * 余额查询的去重缓存 —— 同一个 AK 在一次请求生命周期内只查一次。
+ *
+ * 为什么必须做这个（实测踩到的浪费）：
+ *     一次巡检里，余额会被查两遍：
+ *       · guard.js 的 checkOne    —— 判断「余额是否低于设定下限」
+ *       · views.js 的 buildReport —— 报表里要显示余额
+ *     两边各自维护了一份缓存，互相不知道对方查过，
+ *     于是同一账号的 QueryAccountBalance 被实实在在地调了 2 次。
+ *
+ *     更隐蔽的一层浪费在 getAccountBalance **内部**：
+ *     它会依次尝试 billEndpoint、business.aliyuncs.com、
+ *     business.ap-southeast-1.aliyuncs.com 三个端点，
+ *     只要前一个失败就继续试下一个 —— **每个都是一次真实的接口调用**。
+ *     调用方那一层的缓存根本挡不住这层内部重试。
+ *     所以缓存要放在**函数入口**，而不是各个调用方。
+ *
+ * 为什么放在模块级变量里是安全的：
+ *     Cloudflare Workers 每次请求是独立的执行环境，
+ *     这个 Map 的生命周期天然就是「一次请求」（即一轮巡检），
+ *     不会跨请求串数据，也不需要手动清理。
+ *     换个说法：用 Map 做缓存，正好等价于「一轮巡检内共享」。
+ *
+ * 缓存什么：命中过就存结果（含失败结果 { amount: null }）。
+ *     连失败也要缓存 —— 否则同一账号在一轮里会反复重试失败的端点，
+ *     白白消耗本就紧张的子请求预算（见 B5）。
+ */
+const balanceCacheByAk = new Map();
+
+/** 清空余额缓存。测试用，也可在需要强制刷新时调用。 */
+export function clearBalanceCache() {
+  balanceCacheByAk.clear();
+}
+
 /**
  * 查询账户可用余额，返回 { amount, currency }；失败返回 { amount: null }。
  *
  * 为什么要试两个端点：国内站走 business.aliyuncs.com，
  * 国际站可能只认 business.ap-southeast-1.aliyuncs.com。都试一遍最稳。
+ *
+ * ⚠️ 带请求级缓存：同一个 AK 在**一轮巡检内**只真正调用一次接口。
+ *    见上方 balanceCacheByAk 的说明 —— 这是省配额的关键，
+ *    不要为了「拿到最新值」把缓存去掉，那样会让同一个账号被查好几遍。
  */
 export async function getAccountBalance(accessKeyId, accessKeySecret, region, billEndpoint = '') {
+  const cacheKey = String(accessKeyId || '');
+  if (cacheKey && balanceCacheByAk.has(cacheKey)) {
+    return balanceCacheByAk.get(cacheKey);
+  }
+
+  const result = await fetchAccountBalance(accessKeyId, accessKeySecret, region, billEndpoint);
+  if (cacheKey) {
+    balanceCacheByAk.set(cacheKey, result);
+  }
+  return result;
+}
+
+/** 真正执行余额查询（不含缓存）。抽出来是为了让缓存逻辑一目了然。 */
+async function fetchAccountBalance(accessKeyId, accessKeySecret, region, billEndpoint = '') {
   const endpoints = [];
   if (billEndpoint) {
     endpoints.push(billEndpoint);

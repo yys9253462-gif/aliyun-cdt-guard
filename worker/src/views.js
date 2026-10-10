@@ -334,8 +334,6 @@ export async function buildReport(config) {
     '',
   ];
 
-  const balanceCache = new Map();
-
   for (const user of users) {
     const name = common.sanitize(String(user?.name || '').trim() || user?.instance_id || '未命名');
     const instanceId = String(user?.instance_id || '').trim();
@@ -376,17 +374,25 @@ export async function buildReport(config) {
       billAmount = null;
     }
 
-    // 4. 账户余额（同 AK 复用缓存）
-    if (!balanceCache.has(ak)) {
-      try {
-        balanceCache.set(ak, await api.getAccountBalance(
-          ak, sk, region, user?.bill_endpoint || ''
-        ));
-      } catch (error) {
-        balanceCache.set(ak, { amount: null, currency: '' });
-      }
+    // 4. 账户余额
+    //
+    // 这里不再自己维护一份缓存 —— 去重已经下沉到 aliyun-api.getAccountBalance，
+    // 它按 AK 在「一轮请求内」只真正调用一次接口，guard.js 那边查过的会被直接复用。
+    // 之前这里各存一份、guard.js 也各存一份，两份互不知道，
+    // 同一账号的余额就被实实在在地查了两遍（白白消耗子请求预算）。
+    //
+    // 外面再包一层 try/catch 是「双保险」：接口层已经把异常吞掉了，
+    // 但报表是给用户看的门面，宁可显示「查询失败」也不能让整张报表崩掉。
+    let balanceAmount = null;
+    let balanceCurrency = '';
+    try {
+      const balance = await api.getAccountBalance(ak, sk, region, user?.bill_endpoint || '');
+      balanceAmount = balance.amount;
+      balanceCurrency = balance.currency;
+    } catch (error) {
+      balanceAmount = null;
+      balanceCurrency = '';
     }
-    const { amount: balanceAmount, currency: balanceCurrency } = balanceCache.get(ak);
 
     const percent = trafficGb >= 0 && quota > 0 ? (trafficGb / quota) * 100 : 0;
     let trafficStr;

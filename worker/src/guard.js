@@ -646,6 +646,10 @@ export async function runInspection(env, options = {}) {
   const lockKey = MANUAL_INSPECTION_LOCK;
   const now = common.nowSeconds();
 
+  // 每一轮巡检开始都重置子请求计数 —— 计数器的生命周期就是「一次请求」，
+  // 不重置的话第二次工具调用会带着上一次的余量开始，预算判断就失真了。
+  api.resetSubrequestCount();
+
   try {
     const config = await common.loadConfig(env);
     const state = await common.loadState(env);
@@ -682,8 +686,24 @@ export async function runInspection(env, options = {}) {
     // 逐台写会让额度占用 = 台数 × 288/天，几台机器就把额度吃光。
     const collector = [];
 
+    // ---- 子请求预算保护（B5）----
+    // 免费版单次请求最多 50 个子请求。机器多 + 接口抖动重试时很容易撞上，
+    // 撞上的后果是**整个请求崩掉、本轮结果全丢**。
+    // 这里改成「预算不够就停下，把已检查的结果正常保存并如实汇报」——
+    // 少查几台只是延误，整轮崩掉才是真的影响止损。
+    let checked = 0;
+    let budgetHit = false;
     for (const user of users) {
+      if (api.isSubrequestBudgetExhausted()) {
+        budgetHit = true;
+        logger(
+          `子请求预算已用完（已检查 ${checked}/${users.length} 台），` +
+          '本轮提前收尾以免整个请求失败。剩下的机器会在下一轮巡检补上。'
+        );
+        break;
+      }
       await checkWithTimeout(env, user, config, state, logger, collector);
+      checked += 1;
     }
 
     // 一轮结束统一落盘：状态一次 + 台账一次 = 恒定 2 次写入，
@@ -700,8 +720,9 @@ export async function runInspection(env, options = {}) {
     await common.saveState(env, state);
     await common.appendTrafficHistoryBatch(env, collector);
 
-    logger('巡检结束');
-    return { ok: true, checked: users.length };
+    logger(`巡检结束（已检查 ${checked}/${users.length} 台）`);
+    // budgetHit 透传给上层，让它能在回执里如实说明「本轮没查完」
+    return { ok: true, checked, partial: budgetHit, total: users.length };
   } catch (error) {
     logger(`巡检整体失败: ${common.redact(error && error.message)}`);
     return { ok: false, error: String(error && error.message) };
