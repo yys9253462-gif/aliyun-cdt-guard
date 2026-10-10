@@ -152,6 +152,52 @@ def get_instance_status(ak, sk, region, instance_id, resource_group=''):
     return instances[0].get('Status')
 
 
+def describe_regions(ak, sk):
+    """查询账号可见的全部地域 ID 列表。
+
+    走 ECS 的 DescribeRegions 接口，**动态获取而非硬编码**，
+    这样阿里云将来新开地域（例如东南亚陆续新增的节点）会自动覆盖到。
+    """
+    client = build_client(ak, sk, 'cn-hangzhou')
+    request = _common_request('ecs.aliyuncs.com', '2014-05-26',
+                              'DescribeRegions')
+    request.set_connect_timeout(CONNECT_TIMEOUT_MS)
+    request.set_read_timeout(READ_TIMEOUT_MS)
+    raw = _do(client, request)
+    data = json.loads(raw.decode('utf-8'))
+    regions = data.get('Regions', {}).get('Region', [])
+    result = []
+    for item in regions:
+        rid = item.get('RegionId', '')
+        if rid:
+            result.append(rid)
+    return sorted(set(result))
+
+
+def list_instances(ak, sk, region):
+    """列出指定地域下的全部实例（用于安装向导让用户直接挑选）。
+
+    返回 [{instance_id, instance_name, status}, ...]；无实例返回空列表。
+    """
+    client = build_client(ak, sk, region)
+    request = DescribeInstancesRequest()
+    request.set_protocol_type('https')
+    request.set_connect_timeout(CONNECT_TIMEOUT_MS)
+    request.set_read_timeout(READ_TIMEOUT_MS)
+    request.set_PageSize(100)
+    raw = _do(client, request)
+    data = json.loads(raw.decode('utf-8'))
+    instances = data.get('Instances', {}).get('Instance', [])
+    result = []
+    for inst in instances:
+        result.append({
+            'instance_id': inst.get('InstanceId', ''),
+            'instance_name': inst.get('InstanceName', '') or '',
+            'status': inst.get('Status', ''),
+        })
+    return result
+
+
 def get_instance_detail(ak, sk, region, instance_id, resource_group=''):
     """查询实例详情（状态 / 公网 IP / 规格），用于日报。"""
     client = build_client(ak, sk, region)

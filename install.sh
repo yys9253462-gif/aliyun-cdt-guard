@@ -143,7 +143,7 @@ setup_python_env() {
 
 download_sources() {
     step "第 3 步 / 共 5 步：下载运行程序"
-    for file in common.py notifier.py aliyun_api.py guard.py report.py; do
+    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py; do
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "${REPO_RAW}/${file}" -o "${WORK_DIR}/${file}" || {
                 error "下载 ${file} 失败，请检查网络能否访问 GitHub。"
@@ -231,6 +231,99 @@ collect_telegram() {
     fi
 }
 
+# 找一个能用的 Python 解释器（优先虚拟环境，其次系统）
+# 输出解释器绝对路径；都不可用则返回非零
+find_working_python() {
+    local candidates="${VENV_DIR}/bin/python python3 python"
+    local candidate
+    for candidate in $candidates; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            if "$candidate" -c "import aliyunsdkcore" >/dev/null 2>&1; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done
+    # 虚拟环境存在但上面没命中（例如刚装完依赖），兜底返回虚拟环境
+    if [ -x "${VENV_DIR}/bin/python" ]; then
+        echo "${VENV_DIR}/bin/python"
+        return 0
+    fi
+    return 1
+}
+
+# 自动查询账号下的实例并让用户选择
+# 成功：stdout 输出两行 —— 第 1 行地域代码，第 2 行实例 ID
+# 失败：stdout 为空（调用方回退到手动输入）
+auto_pick_instance() {
+    local ak="$1" sk="$2"
+    local script="${WORK_DIR}/list_instances.py"
+    local py
+
+    py=$(find_working_python 2>/dev/null) || return 0
+    if [ -z "$py" ] || [ ! -f "$script" ]; then
+        return 0
+    fi
+
+    local raw
+    raw=$("$py" "$script" "$ak" "$sk" 2>/dev/null) || return 0
+    if [ -z "$raw" ]; then
+        return 0
+    fi
+
+    # 解析每行 JSON -> "地域|友好名|实例ID|名称|状态"
+    local list="" n=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local region region_name iid iname status
+        region=$(echo "$line" | sed -n 's/.*"region": *"\([^"]*\)".*/\1/p')
+        region_name=$(echo "$line" | sed -n 's/.*"region_name": *"\([^"]*\)".*/\1/p')
+        iid=$(echo "$line" | sed -n 's/.*"instance_id": *"\([^"]*\)".*/\1/p')
+        iname=$(echo "$line" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
+        status=$(echo "$line" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')
+        [ -z "$iid" ] && continue
+        n=$((n + 1))
+        if [ -n "$iname" ]; then
+            printf '  %2d) %s  %s  [%s]  %s\n' "$n" "$region_name" "$iid" "$status" "$iname"
+        else
+            printf '  %2d) %s  %s  [%s]\n' "$n" "$region_name" "$iid" "$status"
+        fi
+        list="${list}${region}|${iid}
+"
+    done <<< "$raw"
+
+    if [ "$n" -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    echo -e "${GREEN}共找到 ${n} 台实例，请选择要监控的那一台：${NC}"
+    echo -e "${CYAN}（输入 0 可改为手动填写）${NC}"
+    local choice
+    choice=$(ask "输入编号" "1")
+    case "$choice" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$choice" -eq 0 ] 2>/dev/null; then
+        return 0
+    fi
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt "$n" ]; then
+        warn "编号超出范围，改为手动填写。"
+        return 0
+    fi
+
+    local sel
+    sel=$(echo "$list" | sed -n "${choice}p")
+    local sel_region sel_iid
+    sel_region=$(echo "$sel" | cut -d'|' -f1)
+    sel_iid=$(echo "$sel" | cut -d'|' -f2)
+    if [ -z "$sel_region" ] || [ -z "$sel_iid" ]; then
+        return 0
+    fi
+    echo "$sel_region"
+    echo "$sel_iid"
+}
+
 # 采集单个实例配置，结果写入全局 NEW_USER
 collect_one_instance() {
     local idx="$1"
@@ -264,29 +357,55 @@ collect_one_instance() {
     fi
 
     echo ""
-    echo "【实例所在地域】"
-    echo "  1) 香港（cn-hongkong）      2) 新加坡（ap-southeast-1）"
-    echo "  3) 日本东京（ap-northeast-1） 4) 美国硅谷（us-west-1）"
-    echo "  5) 美国弗吉尼亚（us-east-1）  6) 德国法兰克福（eu-central-1）"
-    echo "  7) 英国伦敦（eu-west-1）      8) 中国大陆（cn-hangzhou / cn-shanghai 等，手动输入）"
-    echo "  9) 手动输入其他地域代码"
-    local region_opt
-    region_opt=$(ask "选择 1-9" "1")
-    case "$region_opt" in
-        1) REGION="cn-hongkong" ;;
-        2) REGION="ap-southeast-1" ;;
-        3) REGION="ap-northeast-1" ;;
-        4) REGION="us-west-1" ;;
-        5) REGION="us-east-1" ;;
-        6) REGION="eu-central-1" ;;
-        7) REGION="eu-west-1" ;;
-        8) REGION=$(ask_required "输入地域代码，例如 cn-hangzhou") ;;
-        *) REGION=$(ask_required "输入地域代码") ;;
-    esac
+    echo "【怎么找你的机器】"
+    echo "  正在用你刚填的 AccessKey 自动查询账号下的所有实例（约 10 秒）..."
+    echo "  查到了就直接选，查不到再手动填，不影响使用。"
 
-    echo ""
-    echo "【实例 ID】阿里云 ECS 控制台 -> 实例列表 -> 实例 ID 列，形如 i-xxxxxxxx"
-    INSTANCE=$(ask_required "ECS 实例 ID")
+    local picked
+    picked=$(auto_pick_instance "$AK" "$SK")
+    # auto_pick_instance 成功时输出两行：第一行地域，第二行实例ID
+    if [ -n "$picked" ]; then
+        REGION=$(echo "$picked" | sed -n '1p')
+        INSTANCE=$(echo "$picked" | sed -n '2p')
+        info "已选定：${REGION} / ${INSTANCE}"
+    else
+        warn "没能自动查到实例（可能是网络问题或权限不足），改为手动填写。"
+        echo ""
+        echo "【实例所在地域】"
+        echo "  1) 中国香港（cn-hongkong）      2) 新加坡（ap-southeast-1）"
+        echo "  3) 菲律宾 马尼拉（ap-southeast-6） 4) 马来西亚 吉隆坡（ap-southeast-3）"
+        echo "  5) 印度尼西亚 雅加达（ap-southeast-5） 6) 泰国 曼谷（ap-southeast-7）"
+        echo "  7) 日本 东京（ap-northeast-1）   8) 韩国 首尔（ap-northeast-2）"
+        echo "  9) 美国 硅谷（us-west-1）       10) 美国 弗吉尼亚（us-east-1）"
+        echo "  11) 德国 法兰克福（eu-central-1） 12) 英国 伦敦（eu-west-1）"
+        echo "  13) 中国大陆（cn-hangzhou / cn-shanghai 等）"
+        echo "  14) 手动输入其他地域代码"
+        echo ""
+        echo -e "${YELLOW}不知道自己的地域代码？去控制台实例列表页看一眼「地域」那一列，"
+        echo -e "或在页面上方地域切换器里能看到形如 ap-southeast-6 的代码。${NC}"
+        local region_opt
+        region_opt=$(ask "选择 1-14" "1")
+        case "$region_opt" in
+            1) REGION="cn-hongkong" ;;
+            2) REGION="ap-southeast-1" ;;
+            3) REGION="ap-southeast-6" ;;
+            4) REGION="ap-southeast-3" ;;
+            5) REGION="ap-southeast-5" ;;
+            6) REGION="ap-southeast-7" ;;
+            7) REGION="ap-northeast-1" ;;
+            8) REGION="ap-northeast-2" ;;
+            9) REGION="us-west-1" ;;
+            10) REGION="us-east-1" ;;
+            11) REGION="eu-central-1" ;;
+            12) REGION="eu-west-1" ;;
+            13) REGION=$(ask_required "输入地域代码，例如 cn-hangzhou") ;;
+            *) REGION=$(ask_required "输入地域代码，例如 ap-southeast-6") ;;
+        esac
+
+        echo ""
+        echo "【实例 ID】阿里云 ECS 控制台 -> 实例列表 -> 实例 ID 列，形如 i-xxxxxxxx"
+        INSTANCE=$(ask_required "ECS 实例 ID")
+    fi
 
     echo ""
     echo "【流量熔断阈值】单位 GB。CDT 每月有免费额度，超过会开始扣费。"
@@ -396,7 +515,7 @@ self_test() {
 
     echo "1) 检查程序文件..."
     local missing=0
-    for file in common.py notifier.py aliyun_api.py guard.py report.py; do
+    for file in common.py notifier.py aliyun_api.py guard.py report.py list_instances.py; do
         if [ ! -s "${WORK_DIR}/${file}" ]; then
             error "缺少文件 ${file}"
             missing=1

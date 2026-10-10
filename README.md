@@ -62,8 +62,12 @@ SSH 登录你的服务器（任意能联网的 Linux），以 root 执行：
 bash <(curl -sL https://raw.githubusercontent.com/yys9253462-gif/aliyun-cdt-guard/main/install.sh)
 ```
 
-然后跟着中文提示走：粘贴 AccessKey → 选地域 → 填实例 ID → 设流量阈值。
+然后跟着中文提示走：粘贴 AccessKey → **从自动列出的实例里选一台** → 设流量阈值。
 全程大约 3-5 分钟，装完会自动做一次自检并给你发一条测试通知。
+
+> **不用自己找地域代码和实例 ID**：填完 AccessKey 后，脚本会自动查询你账号下
+> **所有地域**的实例，连地域带实例 ID 一起列出来让你选。查不到时会退回手动填写，
+> 手动列表已包含东南亚全部节点（菲律宾 `ap-southeast-6`、马来西亚、印尼、泰国等）。
 
 ---
 
