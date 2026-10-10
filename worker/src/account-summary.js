@@ -42,15 +42,24 @@ export function groupByAccount(users) {
 }
 
 /**
- * 把 AK 打码，只留前 6 位。
+ * 把 AK 打码，只留前 6 位 + 后 4 位。
  *
  * 为什么要打码：AK 属于敏感信息，报表可能被转发。
- * 前 6 位足够你自己认出是哪个账号，剩下的遮住不影响辨识。
+ *
+ * ⚠️ 这里踩过一个真实的坑（多账号用户发现的）：
+ *     最早只留前 6 位，结果**两个账号显示成一模一样** ——
+ *     阿里云的 AccessKey ID 前缀高度相似（都是 LTAI5t...），
+ *     多账号用户看到「账号 LTAI5t****」根本分不清哪个是哪个。
+ *     留前 6 位的作用是「让你认出是哪个账号」，做不到这一点就失去意义了。
+ *
+ * 现在的做法：前 6 位 + 后 4 位。前 6 位用来识别账号，
+ * 后 4 位用来**区分同前缀的不同账号**。中间遮住，仍然不可还原。
  */
 export function maskAk(ak) {
   const value = String(ak || '').trim();
-  if (value.length <= 6) return value || '未填写';
-  return `${value.slice(0, 6)}****`;
+  if (!value) return '未填写';
+  if (value.length <= 10) return value;
+  return `${value.slice(0, 6)}****${value.slice(-4)}`;
 }
 
 /**

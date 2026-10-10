@@ -17,21 +17,15 @@
 
 set -u
 
-# 颜色（不支持的终端会自动忽略）
-BOLD="\033[1m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-RED="\033[31m"
-CYAN="\033[36m"
-RESET="\033[0m"
-
-ok()   { printf "${GREEN}[成功]${RESET} %s\n" "$1"; }
-warn() { printf "${YELLOW}[注意]${RESET} %s\n" "$1"; }
-err()  { printf "${RED}[失败]${RESET} %s\n" "$1"; }
-step() { printf "\n${BOLD}${CYAN}== %s ==${RESET}\n" "$1"; }
-
 DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$DIR" || { err "无法进入项目目录"; exit 1; }
+# ⚠️ 这里用 return 而不是 exit：本文件会被 menu.sh 引用，
+#    顶层 exit 会把菜单一起杀掉（configure.sh 里踩过这个坑）。
+#    只有「直接运行」时才该退出，那种情况下 return 的效果等同于结束。
+cd "$DIR" 2>/dev/null || { echo "无法进入项目目录"; return 1 2>/dev/null || exit 1; }
+
+# 颜色与输出函数：公共库，三个脚本共用同一份（见 lib-ui.sh 里的说明）
+# shellcheck source=lib-ui.sh
+. ./lib-ui.sh
 
 KV_NAME="CDT_GUARD_KV"
 
@@ -560,44 +554,136 @@ probe_worker_url() {
 }
 
 # ---------------------------------------------------------------------------
-# 主流程
+# 可复用的动作（由 menu.sh 调用，也可被单独执行）
 # ---------------------------------------------------------------------------
-main() {
-  printf "${BOLD}==========================================${RESET}\n"
-  printf "${BOLD} CDT 流量守护 · Cloudflare 一键部署${RESET}\n"
-  printf "${BOLD}==========================================${RESET}\n"
-  printf "全程中文提示，跟着走就行。中途想看说明可随时中断重跑。\n"
-  printf "一共 7 步，最后一步会接着问你「要监控哪几台机器」。\n"
+# ⚠️ 设计变动说明（重要，别改回去）：
+#   最初 deploy.sh 只有一个 main()，「打开就跑到底」。
+#   后来加了交互式菜单，于是把 main() 拆成下面这些 **可组合的动作**：
+#     run_full_deploy            完整安装（菜单里的「一站式安装」）
+#     run_redeploy_only          只重新上传代码
+#     run_login_only             只登录
+#     run_selfcheck_only         只自检
+#     run_reset_webhook_secret   只重设网址密钥
+#
+#   拆分的意义：菜单要能「只做其中一件事」。
+#   如果还留着一个大 main()，菜单就只能整段调用，做不到分步。
+#
+#   所有动作都用 **return** 而不是 **exit** ——
+#   因为它们是「被别人调用的」，一 exit 就把菜单也杀了
+#   （这个坑在 configure.sh 里踩过一次，务必记住）。
 
-  local mode="${1:-deploy}"
-
-  if ! check_env; then
-    err "环境检查没通过，请先解决上面标红的问题。"
-    exit 1
-  fi
-
-  if [ "$mode" = "check" ]; then
-    ok "只做检查，到此结束。要正式部署请运行：bash deploy.sh"
-    exit 0
-  fi
-
-  do_login || exit 1
-  do_create_kv || exit 1
-  do_set_secrets || exit 1
-
-  # 密钥存一份到本地，供后面自检使用（.gitignore 已排除）
-  # 为什么它能存：这是**我们自己编的**、不是云厂商发的凭据，
-  # 存下来是为了让「自动自检」这一步能跑通。
-  # 机器人令牌那种高敏感的东西**绝不存盘**。
+# 把网址密钥存到本地（供自动自检使用）
+# 为什么它能存：这是**我们自己编的**、不是云厂商发的凭据；
+# 机器人令牌那种高敏感的东西**绝不存盘**。
+save_webhook_secret_locally() {
   if [ -n "${WEBHOOK_SECRET_VALUE:-}" ]; then
     printf '%s\n' "$WEBHOOK_SECRET_VALUE" > .webhook-secret
     chmod 600 .webhook-secret 2>/dev/null || true
   fi
+}
 
-  do_deploy || exit 1
+# ---- 只登录 ----
+run_login_only() {
+  do_login
+}
+
+# ---- 完整安装 ----
+run_full_deploy() {
+  if ! check_env; then
+    err "环境检查没通过，请先解决上面标红的问题。"
+    printf "提示：回到菜单选「1 环境体检」，它会用中文告诉你缺什么、怎么装。\n"
+    return 1
+  fi
+
+  do_login       || return 1
+  do_create_kv   || return 1
+  do_set_secrets || return 1
+  save_webhook_secret_locally
+
+  do_deploy      || return 1
   do_selfcheck
   do_configure
   print_next_steps
 }
 
-main "$@"
+# ---- 只重新上传代码 ----
+run_redeploy_only() {
+  if ! check_env; then
+    err "环境检查没通过，先选「1 环境体检」。"
+    return 1
+  fi
+  printf "这一步只重新上传代码，不动存储、不动密钥、不动机器配置。\n\n"
+  do_deploy || return 1
+  do_selfcheck
+}
+
+# ---- 只自检 ----
+run_selfcheck_only() {
+  do_selfcheck
+}
+
+# ---- 只重设网址密钥 ----
+run_reset_webhook_secret() {
+  printf "网址密钥的作用：让别人猜不到你的机器人入口。\n"
+  printf "重设后需要重新部署一次，让 Telegram 知道新地址。\n\n"
+
+  local suggested=""
+  suggested="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' || echo '')"
+  [ -z "$suggested" ] && suggested="cdtguard$RANDOM$RANDOM"
+  printf "我帮你生成了一串，直接回车用它：${CYAN}%s${RESET}\n" "$suggested"
+  read -r -p "新网址密钥： " new_secret
+  [ -z "$new_secret" ] && new_secret="$suggested"
+
+  if printf "%s" "$new_secret" | wrun secret put WEBHOOK_SECRET >/dev/null 2>&1; then
+    ok "新密钥已写入。"
+    printf "   新密钥：${BOLD}%s${RESET}\n" "$new_secret"
+    WEBHOOK_SECRET_VALUE="$new_secret"
+    save_webhook_secret_locally
+    printf "\n现在重新部署，让 Telegram 指向新地址...\n\n"
+    do_deploy || return 1
+    do_selfcheck
+  else
+    err "写入失败。请重试，或把报错发给我。"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 直接运行本脚本时的入口
+# ---------------------------------------------------------------------------
+# 两种用法：
+#   1. 直接运行：bash deploy.sh          -> 跑完整安装
+#   2. 被 menu.sh 引用：source 后调 run_* -> 由菜单决定做哪件事
+# 靠下面这个「是否被直接执行」判断区分，被引用时不会自动跑。
+main() {
+  printf "${BOLD}==========================================${RESET}\n"
+  printf "${BOLD} CDT 流量守护 · Cloudflare 一键部署${RESET}\n"
+  printf "${BOLD}==========================================${RESET}\n"
+  printf "全程中文提示，跟着走就行。\n"
+  printf "${DIM}提示：直接运行本文件是「老手用法」。${RESET}\n"
+  printf "${DIM}      第一次用建议跑 bash menu.sh，有菜单更好找。${RESET}\n"
+
+  case "${1:-}" in
+    check)
+      check_env && ok "只做检查，到此结束。"
+      return $?
+      ;;
+    login)     run_login_only ;;
+    deploy|"") run_full_deploy ;;
+    redeploy)  run_redeploy_only ;;
+    selfcheck) run_selfcheck_only ;;
+    *)
+      printf "用法：bash deploy.sh            完整安装\n"
+      printf "      bash deploy.sh check      只检查环境\n"
+      printf "      bash deploy.sh login      只登录\n"
+      printf "      bash deploy.sh redeploy   只重新上传代码\n"
+      printf "      bash deploy.sh selfcheck  只自检\n"
+      return 1
+      ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
