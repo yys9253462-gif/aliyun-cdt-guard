@@ -17,7 +17,12 @@ const API_BASE = 'https://api.telegram.org/bot%s/%s';
 const LEVEL_ICON = {
   info: '\u2139\ufe0f',      // ℹ️
   warn: '\u26a0\ufe0f',      // ⚠️
-  danger: '\U0001f6a8',      // 🚨
+  // ⚠️ 这里曾经写的是 '\U0001f6a8'（大写 U）—— 那是 **Python 的转义语法**，
+  //    在 JavaScript 里 `\U` 不是有效转义，整个字符串会原样变成字面文本
+  //    "U0001f6a8"，于是所有「严重」级告警的开头都挂着一串乱码。
+  //    这个 bug 潜伏很久才被真机验证抓到（menu-labels.js 里专门警告过这个坑，
+  //    结果 telegram.js 自己犯了）。现在用 JS 的 \u{...} 写法，并加测试钉死。
+  danger: '\u{1F6A8}',       // 🚨
 };
 
 /** 每种通知级别对应的前缀文字 */

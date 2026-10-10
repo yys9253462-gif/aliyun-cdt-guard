@@ -293,7 +293,7 @@ bash menu.sh status        # 只看当前状态
 bash tests/run-all.sh
 ```
 
-**510 项检查**（菜单文案 38 + 命令注册 14 + 集成 118 + 添加账号流程 136
+**513 项检查**（菜单文案 41 + 命令注册 14 + 集成 118 + 添加账号流程 136
 + 凭据失效处理 85 + 部署脚本 108），
 不联网、不需要密钥、**不写任何线上数据**。
 
@@ -344,8 +344,8 @@ src/
   views.js            各页面文本构建
   account-summary.js  按账号汇总
 tests/
-  run-all.sh              一键跑全部自检（510 项）
-  test-menu-labels.mjs    菜单文案 38 项（含设备名截断长度）
+  run-all.sh              一键跑全部自检（513 项）
+  test-menu-labels.mjs    菜单文案 41 项（含设备名截断 + Python 转义扫描）
   test-commands.mjs       命令注册一致性 14 项（两份清单比对）
   test-integration.mjs    集成 118 项（含假 KV 实现）
   test-add-account.mjs    添加账号流程 136 项（含地域中文名 / 自动命名 / 删机器）

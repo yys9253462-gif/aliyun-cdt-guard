@@ -179,6 +179,70 @@ console.log('--- 6. 设备名截断长度（自动命名是「中文地域-账�
 }
 
 // ---------------------------------------------------------------------------
+console.log('--- 7. 🔴 全源码扫描：不得出现 Python 风格的 \\U 转义 ---');
+{
+  // 这个坑的真实案例（2026-10-10 真机验证时抓到）：
+  //   telegram.js 里写着 `danger: '\U0001f6a8'` —— 大写 U。
+  //   那是 **Python 的转义语法**，在 JavaScript 里 `\U` 不是有效转义，
+  //   整个字符串会原样变成字面文本 "U0001f6a8"。
+  //   后果：所有「严重」级告警开头都挂着一串乱码，
+  //   而且**不报错、不崩溃** —— 只有把消息打出来看才能发现。
+  //
+  //   讽刺的是 menu-labels.js 的注释里专门警告过这个坑，
+  //   结果 telegram.js 自己犯了。所以这里做全目录扫描，钉死它。
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const srcDir = path.join(here, '..', 'src');
+
+  const offenders = [];
+  for (const f of fs.readdirSync(srcDir)) {
+    if (!f.endsWith('.js')) continue;
+    const text = fs.readFileSync(path.join(srcDir, f), 'utf8');
+    // 逐行扫：`\U` 后面跟 8 位十六进制 —— 合法的 JS 里几乎不会这么写
+    text.split('\n').forEach((line, i) => {
+      const trimmed = line.trim();
+      // 跳过整行注释：`//` 开头、`*` 开头（块注释体）、`/*` 开头。
+      // 注释里正是我们记录这个坑的地方，不该被误判。
+      if (trimmed.startsWith('//') || trimmed.startsWith('*')
+          || trimmed.startsWith('/*')) {
+        return;
+      }
+      // 行内注释也要切掉
+      const code = line.split('//')[0];
+      if (/\\U[0-9a-fA-F]{8}/.test(code)) {
+        offenders.push(`${f}:${i + 1}`);
+      }
+    });
+  }
+  check('源码里没有 \\U 大写转义（会被 JS 当成字面文本）',
+    offenders.length === 0, offenders.join(', '));
+
+  // 反过来：确认 danger 图标现在真的是个 emoji，而不是 "U0001f6a8"
+  const tg = await import('../src/telegram.js');
+  const { sendAlert } = tg;
+  // 直接看它发出的消息首字符（用假 fetch 抓一条）
+  const captured = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captured.push(JSON.parse(options?.body || '{}'));
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+  await sendAlert(
+    { telegram: { bot_token: '1:FAKE', chat_id: '1' } },
+    '测试标题', '测试正文', 'danger'
+  );
+  globalThis.fetch = realFetch;
+
+  const text = String(captured[0]?.text || '');
+  check('danger 级告警的图标是真正的 emoji（不是字面 U0001f6a8）',
+    !text.includes('U0001f6a8'), text.slice(0, 40));
+  check('danger 级告警图标是 🚨',
+    text.includes('\u{1F6A8}'), text.slice(0, 40));
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(`===== 结果: 通过 ${pass} / 失败 ${fail} =====`);
 process.exit(fail === 0 ? 0 : 1);
