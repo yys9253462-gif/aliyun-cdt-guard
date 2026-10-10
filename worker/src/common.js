@@ -312,6 +312,52 @@ export function eventAllowed(state, key, event, cooldown = NOTIFY_COOLDOWN) {
   return nowSeconds() - last >= cooldown;
 }
 
+/**
+ * 清掉某台机器在 state 里的**所有**痕迹。
+ *
+ * 为什么会需要：删除机器时，如果只把 config 里那一条摘掉、state 里
+ * 却留着旧的失败计数与冷却标记，会留下两类隐患：
+ *   1. 用户重新添加同一台机器（同 instance_id）时，旧的
+ *      `check_failures` 计数会「继承」过来，可能**一上来就报警**；
+ *   2. 键本身会永久残留在 KV 里，越积越多。
+ *
+ * 要清的键有两层：
+ *   · `${id}`            —— 失败计数、冷却标记、last_status
+ *   · `${id}:cred_failed` —— 凭据失效的冷却标记（markEvent 写在这一层）
+ *     这两层是最容易漏的坑，本项目的测试里专门盯着它。
+ *
+ * @returns {boolean} 是否真的删掉了东西（调用方可用它判断要不要写回）
+ */
+export function purgeDeviceState(state, instanceId) {
+  const id = String(instanceId || '').trim();
+  if (!id || !state) {
+    return false;
+  }
+  let changed = false;
+  if (Object.prototype.hasOwnProperty.call(state, id)) {
+    delete state[id];
+    changed = true;
+  }
+  // 把所有以 `${id}:` 开头的派生键一并清掉（例如 `${id}:cred_failed`）
+  for (const key of Object.keys(state)) {
+    if (key.startsWith(`${id}:`)) {
+      delete state[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** 读取状态 → 清痕迹 → 写回。删除机器时用。 */
+export async function clearDeviceState(env, instanceId) {
+  const state = await loadState(env);
+  const changed = purgeDeviceState(state, instanceId);
+  if (changed) {
+    await saveState(env, state);
+  }
+  return changed;
+}
+
 /** 记录事件发生时间（用于冷却判断） */
 export function markEvent(state, key, event) {
   if (!state[key]) {

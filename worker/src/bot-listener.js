@@ -86,9 +86,11 @@ export function deviceMenuRows(config) {
 /** 三级菜单：单机操作。暂停状态不同，按钮文字不同。 */
 export function deviceActionRows(user) {
   const paused = Boolean(user?.paused);
+  // 删除单独占一行（放在最后、和「返回」隔开），避免和常用按钮挨着被手滑点中
   return [
     [L.LBL_DEV_STATUS, L.LBL_DEV_START],
     [L.LBL_DEV_STOP, paused ? L.LBL_DEV_RESUME : L.LBL_DEV_PAUSE],
+    [L.LBL_DEV_DELETE],
     [L.LBL_BACK_LIST, L.LBL_BACK_MAIN],
   ];
 }
@@ -124,6 +126,49 @@ export function findUserByName(config, name) {
 // ---------------------------------------------------------------------------
 // 动作实现
 // ---------------------------------------------------------------------------
+/**
+ * 从监控配置里删除一台机器。返回结果说明文本。
+ *
+ * ⚠️ 为什么需要这个（2026-10-10 用户反馈）：
+ *   当凭据失效**且**那台机器在阿里云上已经被删除时，用户既不能让
+ *   巡检成功、也无法消除告警 —— 唯一出路就是把它从监控列表里摘掉。
+ *   以前没有这个入口，用户只能眼睁睁看着告警一直刷。
+ *
+ * 安全设计：
+ *   · 只删配置里的这一条记录，**绝不会去阿里云删实例**
+ *     （远程销毁资源是不可逆操作，不该由一个通知按钮触发）；
+ *   · 顺手清掉这台机器在 state 里的所有痕迹（失败计数、冷却标记、
+ *     状态快照），否则这些记录会一直留着；
+ *   · 返回文案里明确说「阿里云上的机器没动」，避免误以为实例被删了。
+ */
+export async function deleteDevice(env, config, instanceId) {
+  const list = Array.isArray(config?.users) ? config.users : [];
+  const idx = list.findIndex((u) => String(u?.instance_id || '') === String(instanceId || ''));
+  if (idx < 0) {
+    return '这台机器已经不在监控列表里了。';
+  }
+
+  const removed = list[idx];
+  const name = common.sanitize(removed?.name || instanceId);
+  const region = removed?.region || '';
+
+  list.splice(idx, 1);
+  await common.saveConfig(env, config);
+
+  // 清掉这台机器在 state 里的痕迹，避免残留计数 / 冷却标记
+  // 影响以后同名或同 ID 的机器。
+  await common.clearDeviceState(env, instanceId);
+
+  const lines = [
+    `已把 ${name} 从监控列表里删除。`,
+    region ? `（地域 ${region}，实例 ${instanceId}）` : `（实例 ${instanceId}）`,
+    '',
+    '注意：**阿里云上的 ECS 实例本身没有被删除**，监控只是不再管它。',
+    '如果这台机器确实不用了，记得去阿里云控制台释放实例，避免继续计费。',
+  ];
+  return lines.join('\n');
+}
+
 /** 暂停 / 恢复某台机器的监控。返回结果说明文本。 */
 export async function togglePause(env, config, instanceId) {
   const user = findUserById(config, instanceId);
@@ -580,6 +625,15 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
       if (refreshed) await sendDeviceActions(token, chatId, refreshed);
       return;
     }
+    if (L.matchMain(raw, L.LBL_DEV_DELETE)) {
+      const message = await deleteDevice(env, config, current.instance_id);
+      await tg.sendText(token, chatId, message);
+      // 这台机器已经没了，把「当前选中」清掉并回到列表，
+      // 否则三级菜单还挂着一台不存在的机器，后面点什么都找不到。
+      await common.setCurrentDevice(env, chatId, '');
+      await sendDeviceList(token, chatId, config);
+      return;
+    }
   }
 
   // ---- 什么都没匹配上 ----
@@ -758,6 +812,20 @@ async function dispatchCallback(env, config, token, callback) {
     case 'pz':
       await tg.answerCallback(token, callbackId, '正在切换...');
       await tg.sendText(token, chatId, await togglePause(env, config, instanceId));
+      return;
+
+    case 'del': {
+      // 「凭据失效」告警里的「删除这台机器」按钮。
+      // 用户诉求：失效/已删除的机器要能一键摘掉，而不是被反复报警。
+      await tg.answerCallback(token, callbackId, '正在删除...');
+      await tg.sendText(token, chatId, await deleteDevice(env, config, instanceId));
+      return;
+    }
+
+    case 'addacct':
+      // 告警里的「添加账号」按钮 —— 直接进入添加账号流程
+      await tg.answerCallback(token, callbackId, '开始添加账号');
+      await startAddAccount(env, token, chatId);
       return;
 
     default:

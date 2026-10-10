@@ -689,6 +689,159 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
 }
 
 // ---------------------------------------------------------------------------
+console.log('--- 15. 🔴 删除失效机器（用户诉求：失效/已删的别一直报警）---');
+{
+  const bot = await import('../src/bot-listener.js');
+
+  function cfg() {
+    return {
+      telegram: { bot_token: TOKEN, chat_id: CHAT },
+      users: [
+        { name: '菲律宾节点', instance_id: 'i-aaa111', region: 'ap-southeast-6',
+          ak: 'LTAI-FAKE-AAAA', sk: 'S1', traffic_limit: 180, paused: false },
+        { name: '北京机器', instance_id: 'i-bbb222', region: 'cn-beijing',
+          ak: 'LTAI-FAKE-BBBB', sk: 'S2', traffic_limit: 20, paused: false },
+      ],
+    };
+  }
+
+  // 15a. 直接调 deleteDevice：删掉一台、另一台必须原封不动
+  {
+    const env = freshEnv();
+    const config = cfg();
+    await common.saveConfig(env, config);
+
+    const msg = await bot.deleteDevice(env, config, 'i-aaa111');
+    check('删除后给回了说明文案', typeof msg === 'string' && msg.length > 0);
+
+    const after = await common.loadConfig(env);
+    check('被删的机器从配置里消失了',
+      !after.users.some((u) => u.instance_id === 'i-aaa111'));
+    check('🔴 另一台机器绝不能被误删',
+      after.users.length === 1 && after.users[0].instance_id === 'i-bbb222',
+      `实际剩 ${after.users.length} 台`);
+    check('保留下来的机器字段完整（阈值没被冲掉）',
+      after.users[0].traffic_limit === 20 && after.users[0].name === '北京机器');
+
+    // 文案必须明确「阿里云上的实例没删」—— 避免用户误以为实例被销毁了
+    check('文案说明「阿里云上的实例没有被删除」',
+      msg.includes('阿里云') && (msg.includes('没有') || msg.includes('没动')),
+      msg);
+  }
+
+  // 15b. 删除不存在的机器要温柔报错，不能抛
+  {
+    const env = freshEnv();
+    const config = cfg();
+    await common.saveConfig(env, config);
+    const msg = await bot.deleteDevice(env, config, 'i-不存在');
+    check('删不存在的机器不抛异常，只给提示',
+      typeof msg === 'string' && msg.length > 0, msg);
+    const after = await common.loadConfig(env);
+    check('删不存在的机器时，原有两台都不动', after.users.length === 2);
+  }
+
+  // 15c. 🔴 删除时必须清掉 state 里的痕迹（否则重加同 ID 会「继承」旧计数）
+  {
+    const env = freshEnv();
+    const config = cfg();
+    await common.saveConfig(env, config);
+
+    // 造一份「这台机器已经连续失败 16 次」的状态
+    const state = {
+      'i-aaa111': { check_failures: 16, last_status: 'Running' },
+      'i-aaa111:cred_failed': { cred_failed: common.nowSeconds() },
+      'i-bbb222': { last_status: 'Running' },
+    };
+    await common.saveState(env, state);
+
+    await bot.deleteDevice(env, config, 'i-aaa111');
+
+    const after = await common.loadState(env);
+    check('删机器后，该机器的失败计数被清掉',
+      !after['i-aaa111'], JSON.stringify(after['i-aaa111']));
+    check('删机器后，该机器的凭据冷却标记被清掉',
+      !after['i-aaa111:cred_failed'], JSON.stringify(after['i-aaa111:cred_failed']));
+    check('🔴 其他机器的状态不受影响',
+      after['i-bbb222'] && after['i-bbb222'].last_status === 'Running');
+  }
+
+  // 15d. purgeDeviceState 单元级：前缀派生键要一并清掉
+  {
+    const state = {
+      'i-x1': { a: 1 },
+      'i-x1:cred_failed': { cred_failed: 1 },
+      'i-x1:quota_warn': { quota_warn: 1 },
+      'i-x10': { keep: true },       // 前缀相同但**不是**同一台（前面是 i-x1 后接 0）
+    };
+    const changed = common.purgeDeviceState(state, 'i-x1');
+    check('purge 返回 true（确实删了东西）', changed === true);
+    check('主键被清掉', !state['i-x1']);
+    check('派生键 cred_failed 被清掉', !state['i-x1:cred_failed']);
+    check('派生键 quota_warn 被清掉', !state['i-x1:quota_warn']);
+    check('🔴 前缀相似但不是同一台机器的键必须保住',
+      state['i-x10'] && state['i-x10'].keep === true);
+  }
+
+  // 15e. 🔴 回调链路：点「删除」按钮 → 真的删掉 → 回话
+  {
+    const env = freshEnv();
+    const config = cfg();
+    await common.saveConfig(env, config);
+    const calls = installFakeFetch();
+
+    await bot.handleCallback(env, config, TOKEN, {
+      id: 'cb-1',
+      data: 'del:i-aaa111',
+      message: { chat: { id: CHAT }, message_id: 5 },
+    });
+
+    check('按钮被立刻回应（不转圈）', calls.answerCallbackQuery.length === 1,
+      `实际 ${calls.answerCallbackQuery.length}`);
+
+    const after = await common.loadConfig(env);
+    check('🔴 点按钮后配置里真的删掉了',
+      !after.users.some((u) => u.instance_id === 'i-aaa111'),
+      `实际剩 ${after.users.map((u) => u.instance_id).join(',')}`);
+    check('回复了删除结果文案',
+      allText(calls).includes('删除') || allText(calls).includes('已把'),
+      allText(calls).slice(0, 120));
+  }
+
+  // 15f. 🔴 越权保护：非本人点击「删除」必须无效
+  {
+    const env = freshEnv();
+    const config = cfg();
+    await common.saveConfig(env, config);
+    const calls = installFakeFetch();
+
+    await bot.handleCallback(env, config, TOKEN, {
+      id: 'cb-2',
+      data: 'del:i-aaa111',
+      message: { chat: { id: '999999999' }, message_id: 6 },   // 不是本人
+    });
+
+    const after = await common.loadConfig(env);
+    check('🔴 外人点删除按钮，机器不能被删掉', after.users.length === 2,
+      `实际剩 ${after.users.length} 台`);
+    check('外人点击只得到「无权操作」，没有执行删除',
+      calls.answerCallbackQuery.some((c) => String(c.text || '').includes('无权')),
+      JSON.stringify(calls.answerCallbackQuery.map((c) => c.text)));
+  }
+
+  // 15g. 三级菜单里必须有「删除机器」这一项（否则用户找不到入口）
+  {
+    const rows = bot.deviceActionRows({ instance_id: 'i-x', paused: false });
+    const flat = rows.flat();
+    check('三级菜单含「删除机器」按钮', flat.includes(L.LBL_DEV_DELETE),
+      flat.join(' | '));
+    check('删除按钮与常用按钮分开（单独占一行，防手滑）',
+      rows.some((r) => r.length === 1 && r[0] === L.LBL_DEV_DELETE),
+      JSON.stringify(rows));
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log('==========================================');
 console.log(`添加账号流程自检: 通过 ${pass} / 失败 ${fail}`);

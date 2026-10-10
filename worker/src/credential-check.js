@@ -115,8 +115,11 @@ export async function buildCredentialReport(config) {
       }
       lines.push('');
       lines.push(`  原因: ${g.reason.split('\n')[0]}`);
-      lines.push('  怎么修: 点「➕ 添加账号」重新填一份有效凭据。'
-        + '（同一账号下的机器会被认出，不会重复添加。）');
+      lines.push('  怎么处理（二选一）:');
+      lines.push('   1. 机器还在用 → 点「➕ 添加账号」重新填一份有效凭据。');
+      lines.push('      （同一账号下的机器会被认出，不会重复添加。）');
+      lines.push('   2. 机器已经不用了 / 在阿里云上删掉了 →');
+      lines.push('      点「⚙️ 单机操作」选中该机器，把它从监控里删除。');
     } else {
       lines.push('  ⏳ 暂时查不通（不是凭据问题，稍后再试）');
       lines.push(`  原因: ${g.reason.split('\n')[0]}`);

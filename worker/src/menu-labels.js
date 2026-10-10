@@ -52,6 +52,7 @@ export const LBL_DEV_START = '\u{1F680} 开机';            // 🚀
 export const LBL_DEV_STOP = '\u{1F6D1} 关机';             // 🛑
 export const LBL_DEV_PAUSE = '\u{23F8}\u{FE0F} 暂停监控'; // ⏸️
 export const LBL_DEV_RESUME = '\u{25B6}\u{FE0F} 恢复监控'; // ▶️
+export const LBL_DEV_DELETE = '\u{1F5D1} 删除机器';       // 🗑
 export const LBL_BACK_LIST = '\u{1F519} 返回列表';        // 🔙
 
 /** 实例按钮的图标前缀 */

@@ -308,7 +308,8 @@ console.log('--- 5. 凭据告警不受普通冷却压制（网络抖动才压）
   check('冷却生效，不会 5 轮发 5 条', calls.sendMessage.length <= 2,
     `实际 ${calls.sendMessage.length} 条`);
 
-  // 手动把冷却标记往前拨 25 小时，应该能再发一条。
+  // 手动把冷却标记往前拨 25 小时 —— 按**新设计**这还不够，
+  // 因为冷却期已从 24 小时拉长到 7 天（用户反馈「别一直报」）。
   // ⚠️ 注意键名：告警标记写在 `${key}:cred_failed` 这一层
   //    （因为 eventKey 就是 `${key}:cred_failed`），别写到 `${key}` 上。
   const key = user.instance_id;
@@ -316,8 +317,52 @@ console.log('--- 5. 凭据告警不受普通冷却压制（网络抖动才压）
   await common.saveState(env, state);
   const before = calls.sendMessage.length;
   await guard.checkOne(env, user, config, state, () => {});
-  check('过了 24 小时会再提醒一次（不会「安静地一直坏着」）',
-    calls.sendMessage.length > before, `前 ${before} 后 ${calls.sendMessage.length}`);
+  check('过了 24 小时【不再】重复打扰（冷却已改为 7 天）',
+    calls.sendMessage.length === before, `前 ${before} 后 ${calls.sendMessage.length}`);
+
+  // 把标记拨到 8 天前，才应该再发一条（真的是「隔很久才提醒一次」）
+  state[`${key}:cred_failed`] = { cred_failed: common.nowSeconds() - 8 * 86400 };
+  await common.saveState(env, state);
+  const before2 = calls.sendMessage.length;
+  await guard.checkOne(env, user, config, state, () => {});
+  check('过了 7 天会再提醒一次',
+    calls.sendMessage.length > before2, `前 ${before2} 后 ${calls.sendMessage.length}`);
+}
+
+console.log('--- 5b. 🔴 凭据失效告警必须带「删除这台机器」按钮 ---');
+{
+  const env = { CDT_GUARD_KV: new FakeKV() };
+  const calls = installFakeFetch(async () => aliyunError(
+    'InvalidAccessKeyId.NotFound', 'not exist'
+  ));
+  const config = baseConfig();
+  const state = {};
+  const user = config.users[0];
+  await guard.checkOne(env, user, config, state, () => {});
+
+  check('发出了告警', calls.sendMessage.length >= 1, `实际 ${calls.sendMessage.length}`);
+  const msg = calls.sendMessage[0] || {};
+  const keyboard = msg.reply_markup && msg.reply_markup.inline_keyboard;
+  check('告警带了内联按钮', Array.isArray(keyboard), `实际 ${typeof keyboard}`);
+
+  const flat = (keyboard || []).flat();
+  const delBtn = flat.find((b) => String(b.callback_data || '').startsWith('del:'));
+  check('有「删除这台机器」按钮', Boolean(delBtn),
+    `实际 ${JSON.stringify(flat.map((b) => b.callback_data))}`);
+  check('按钮精确指向这台机器',
+    Boolean(delBtn) && delBtn.callback_data === `del:${user.instance_id}`,
+    `实际 ${delBtn && delBtn.callback_data}`);
+
+  const addBtn = flat.find((b) => b.callback_data === 'addacct');
+  check('同时给了「添加账号」的出口', Boolean(addBtn),
+    `实际 ${JSON.stringify(flat.map((b) => b.callback_data))}`);
+
+  // 文案要让用户明白「机器已经删了 / 不用了」该怎么办 ——
+  // 这正是用户提这个需求时最在意的一句。
+  const text = String(msg.text || '');
+  check('文案告诉用户「已删除 / 不用了」可以删掉它',
+    text.includes('已经不用') || text.includes('删掉') || text.includes('删除'),
+    text.slice(0, 200));
 }
 
 console.log('--- 6. 密钥修好后，冷却标记要清掉（否则下次漏报）---');

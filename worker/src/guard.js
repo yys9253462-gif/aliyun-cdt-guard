@@ -29,16 +29,21 @@ const RESOURCE_RETRY_COOLDOWN = 1800;
 /** 连续巡检失败达到该次数，发出「监控失明」告警 */
 const CHECK_FAILURE_ALERT_THRESHOLD = 3;
 /**
- * 凭据类错误的提醒间隔（秒）—— 24 小时。
+ * 凭据类错误的提醒间隔（秒）—— 7 天。
  *
  * 为什么凭据类要单独一条通道、而且**不受普通冷却压制**：
  *   普通冷却（1 小时）是为「网络抖动」这类噪音设计的 —— 那种问题
  *   等一会儿自己会好，报多了纯属骚扰。
  *   但「AK 失效」不一样：**你不去换 Key，它就永远坏着**，
  *   而这段时间里流量监控和自动止损**全程失效**（可能一直在扣钱）。
- *   所以这类错误必须持续提醒 —— 每天一次，直到你处理掉。
+ *
+ * ⚠️ 间隔从 24 小时拉长到 7 天（2026-10-10，用户反馈后调整）：
+ *   原因是「每 24 小时报一次」在**机器已被删除**这种场景下会变成
+ *   永久骚扰 —— 用户没法让它停，因为 Key 永远修不好。
+ *   现在首次告警里直接给了「删除这台机器」按钮，点一下就彻底解决；
+ *   不去点的话，7 天内也不会再重复打扰。
  */
-const CREDENTIAL_ALERT_COOLDOWN = 86400;
+const CREDENTIAL_ALERT_COOLDOWN = 604800;
 /** 单实例巡检软超时（毫秒）—— 覆盖正常的开机等待时间 */
 const USER_CHECK_TIMEOUT_MS = 100000;
 /** 等待实例进入 Running 的轮询参数 */
@@ -380,18 +385,40 @@ async function handleCheckFailure(state, config, name, key, error, logger) {
   const count = common.bumpCounter(state, key, 'check_failures');
 
   if (kind === ERR_CREDENTIAL) {
-    // ---- A. 凭据类：高优先级，每天提醒一次，直到修好 ----
+    // ---- A. 凭据类：只发一次，带「删除这台机器」按钮 ----
+    //
+    // ⚠️ 设计变更（2026-10-10，用户反馈）：
+    //   用户原话：「凡是删除的或者失效的应该询问我是否删除，
+    //             而不是一直报巡检失败」
+    //
+    //   旧行为：每 24 小时重复发一次「凭据失效」，永不停止。
+    //     问题：如果这台机器在阿里云上**已经被删了**（用户换了账号、
+    //     把旧实例释放了），那这个 Key 永远修不好 —— 告警就会
+    //     **一天一次永远刷下去**，用户既无法消除它，也不知道能删掉它。
+    //     截图实测：连续 16 次巡检失败后仍在报。
+    //
+    //   新行为：首次发现时发**一条**告警，并附上「删除这台机器」按钮。
+    //     你点一下按钮就删掉了，告警彻底消失。
+    //     如果不去点，它在 7 天内不会重复打扰（见 CREDENTIAL_ALERT_COOLDOWN）。
+    //     如果真的只是密钥过期、你想换新的，点「➕ 添加账号」重填即可 ——
+    //     换好之后状态恢复正常，这条记录也会自动清掉。
     const eventKey = `${key}:cred_failed`;
     if (common.eventAllowed(state, eventKey, 'cred_failed', CREDENTIAL_ALERT_COOLDOWN)) {
       const msg = `机器: ${common.sanitize(name)}\n`
         + `⚠️ 这对阿里云凭据出了问题，流量监控与自动止损当前处于失效状态。\n\n`
         + `${message}\n\n`
-        + `怎么修：在 Telegram 里点「➕ 添加账号」重新填一份有效凭据，`
-        + `或点「🔑 凭据体检」查看所有账号的状态。\n`
-        + `（在你处理之前，本提醒每天会发一次。）`;
-      if (await sendAlert(config, '凭据失效（监控已中断）', msg, 'danger', logger)) {
+        + `怎么处理（二选一）：\n`
+        + `  1. 机器还在用 → 点「➕ 添加账号」重新填一份有效凭据；\n`
+        + `  2. 机器已经不用了 / 在阿里云上删掉了 → 点下面的`
+        + `「🗑 删除这台机器」，把它从监控里摘掉，告警就不再出现。\n\n`
+        + `（本提醒 7 天内只发一次，不会反复打扰。）`;
+      // 带按钮：直接删除这台失效机器
+      const keyboard = [[
+        { text: '🗑 删除这台机器', callback_data: `del:${key}` },
+        { text: '➕ 添加账号', callback_data: 'addacct' },
+      ]];
+      if (await sendAlert(config, '凭据失效（监控已中断）', msg, 'danger', logger, keyboard)) {
         common.markEvent(state, eventKey, 'cred_failed');
-        // 凭据问题解决了才该清这个标记，所以这里不动 check_failures 的冷却标记
       }
     }
     return;

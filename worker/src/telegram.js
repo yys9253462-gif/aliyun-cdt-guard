@@ -231,8 +231,13 @@ export async function getWebhookInfo(token) {
  *
  * 对应 Python 版的 send_alert：把「级别 + 标题 + 正文」组合成一条消息，
  * 并根据配置决定推到哪些渠道。本版本只推 Telegram。
+ *
+ * @param {Array|null} keyboard 可选的内联按钮，形如
+ *        `[[{ text, callback_data }]]`。传了就让告警消息自带操作按钮
+ *        （例如「凭据失效」告警带一个「🗑 删除这台机器」）——
+ *        用户可以直接在告警里点按钮处理，不用再去翻菜单。
  */
-export async function sendAlert(config, title, body, level = 'info', logger = null) {
+export async function sendAlert(config, title, body, level = 'info', logger = null, keyboard = null) {
   const telegram = (config && config.telegram) || {};
   const token = (telegram.bot_token || '').trim();
   const chatId = telegram.chat_id;
@@ -248,7 +253,7 @@ export async function sendAlert(config, title, body, level = 'info', logger = nu
   const prefix = LEVEL_PREFIX[level] || LEVEL_PREFIX.info;
   const text = `${icon} *${sanitize(title)}*\n\n${body}`;
 
-  const ok = await sendText(token, chatId, text);
+  const ok = await sendText(token, chatId, text, keyboard);
   if (logger) {
     logger(`通知「${title}」${ok ? '已发送' : '发送失败'}`);
   }
