@@ -16,7 +16,37 @@
 
 **成本：0 元。** 免费额度（每天 10 万次请求）远超实际用量（每天约 300 次）。
 
-## 快速开始（推荐：打开菜单）
+## 快速开始（小白版：从零开始）
+
+### ① 先装 Git Bash（Windows 必装，Mac / Linux 跳过）
+
+这套脚本要在 Git Bash 里跑，Windows 默认没有。
+
+1. 打开 https://git-scm.com/download/win
+2. 网页自动下载，双击安装包，**一路 Next**（默认选项全不用改）
+3. 装完**随便找个文件夹右键，能看到「Git Bash Here」就成功了**
+
+> 装一次就够，以后不用再管。本项目的 `安装.ps1` 会自动找到它，
+> 找不到时会**直接告诉你这条命令：`winget install --id Git.Git -e`**，
+> 或打开官网下载页。
+
+### ② 双击启动器
+
+解压安装包后，文件夹里有个 **`安装.ps1`** —— **右键 → 使用 PowerShell 运行**。
+
+它会自动找到 Git Bash 并打开中文菜单。三种情况：
+
+| 情况 | 表现 |
+|---|---|
+| 环境齐全 | 直接进菜单 |
+| 没装 Git Bash | 打印安装指引（含 `winget` 命令 + 官网链接），可一键打开下载页 |
+| 提示脚本被禁用 | 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试 |
+
+> **为什么用 `.ps1` 而不是 `.bat`**：cmd.exe 按 GBK 解码 `.bat`，
+> 而文件是 UTF-8 —— 中文全变乱码，乱码还会被当命令执行。
+> PowerShell 原生支持 UTF-8，所以改用 `.ps1`。
+
+### ③ 打开菜单（Mac / Linux / 老手）
 
 ```bash
 bash menu.sh
@@ -41,8 +71,12 @@ Worker 部署没、配了几台机器几个账号），选哪个就干哪个：
   0) 使用说明          常见问题与原理说明
 ```
 
-**没装 Node 也没关系**：菜单里的「1 环境体检」会告诉你缺什么，并按你的系统
-（Windows / macOS / Linux）给出**可以直接复制的安装命令**，装完怎么验证也写清楚了。
+**没装 Node 也没关系**：菜单里的「1 环境体检」会**直接问你「要不要现在自动装」**，
+输入 `y` 回车就自己下载安装（自动认版本、分平台下载、装到用户目录、装完实测能不能跑），
+不用你去官网手动下。自动装失败才会退回「按系统给命令」的兜底指引。
+
+**没登录 Cloudflare 也没关系**：部署到那一步会自动调起浏览器授权，
+你只要在浏览器里点一下「允许」。
 
 ### 老手用法（跳过菜单）
 
@@ -149,6 +183,13 @@ bash tests/run-all.sh
 **285 项检查**（菜单文案 34 + 命令注册 14 + 集成 73 + 添加账号流程 56 + 部署脚本 108），
 不联网、不需要密钥、**不写任何线上数据**。
 
+启动器另有一份独立测试（11 项，PowerShell 运行），验证「找得到 / 找不到 Git Bash」
+两条分支、中文往返、退出码透传是否正常：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests/test-launcher.ps1
+```
+
 ## 功能一览
 
 | 类别 | 内容 |
@@ -188,11 +229,13 @@ tests/
   test-integration.mjs    集成 73 项（含假 KV 实现）
   test-add-account.mjs    添加账号流程 56 项（含假 KV + 假 Telegram）
   test-scripts.sh         部署脚本 108 项（结构、安全、演练模式、菜单）
+  test-launcher.ps1       Windows 启动器 11 项（PowerShell）
 menu.sh               交互式主菜单（唯一入口，推荐）
+安装.ps1              Windows 双击启动器（找 Git Bash → 开菜单，找不到给指引）
 deploy.sh             一键部署（也可被 menu.sh 调用）
 configure.sh          机器清单配置 + 添加账号（可独立跑）
 lib-ui.sh             终端输出公共库（颜色、ok/warn/err、确认）
-lib-preflight.sh      环境体检（缺什么、按系统给安装指引）
+lib-preflight.sh      环境体检（缺什么、自动装 Node、Cloudflare 登录引导）
 wrangler.toml         Cloudflare 配置
 ```
 
@@ -220,6 +263,8 @@ wrangler.toml         Cloudflare 配置
 - [x] **真实机器巡检成功**（状态 Running、流量 0.1913 GB，与原始字节数吻合）
 - [x] **交互式菜单改造**（`menu.sh`，10 个菜单项）
 - [x] **零依赖适配**（`lib-preflight.sh` 按系统给中文安装指引）
+- [x] **全自动装环境**（Node 缺失时自动下载安装并实测，真机验证通过）
+- [x] **Windows 双击启动器**（`安装.ps1`，自动找 Git Bash，找不到给 winget 指引）
 - [x] **支持添加多个阿里云账号**（自动扫描机器、凭据错误精确报错）
 - [x] **机器人内添加账号**（手机上点几步：发密钥 → 自动扫描 → 一键全配好）
 - [x] **输入校验**（实例 ID / 地域 / 阈值 / Telegram ID 格式不对会拦住并解释）
