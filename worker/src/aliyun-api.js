@@ -22,6 +22,25 @@ const CDT_REGION = 'cn-hangzhou';
 
 const ECS_VERSION = '2014-05-26';
 
+// ---------------------------------------------------------------------------
+// 🔴 ECS 端点：必须用「地域专属端点」，不能用通用入口（真机实测踩坑）
+// ---------------------------------------------------------------------------
+// 2026-10-10 用真实账号实测发现：
+//     用通用入口 https://ecs.aliyuncs.com/ 查菲律宾（ap-southeast-6）的机器，
+//     返回 HTTP 404：
+//       {"Code":"InvalidOperation.NotSupportedEndpoint",
+//        "Message":"The specified endpoint cant operate this region."}
+//     换成地域专属端点 https://ecs.ap-southeast-6.aliyuncs.com/ 立刻返回 200。
+//
+//     也就是说：**新建的海外地域（东南亚陆续在加）通用入口不覆盖**，
+//     只有 `ecs.<地域>.aliyuncs.com` 这一个可靠写法。
+//
+//     所以下面所有涉及实例的接口（查列表 / 开机 / 关机 / 重启）
+//     一律用 `ecs.${region}.aliyuncs.com`，**不要图省事改回通用入口**。
+//
+//     唯一的例外是 DescribeRegions（查地域列表本身）——它没有
+//     「属于哪个地域」的概念，只能用通用入口，实测通用入口对它可用。
+
 export const BSS_VERSION = '2017-12-14';
 export const BSS_ENDPOINTS = [
   'business.aliyuncs.com',
