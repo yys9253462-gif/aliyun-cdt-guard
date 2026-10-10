@@ -32,6 +32,7 @@ import {
   startAddAccount,
   handleAddAccountStep,
 } from './add-account.js';
+import { buildCredentialReport } from './credential-check.js';
 
 // ---------------------------------------------------------------------------
 // 权限校验
@@ -63,7 +64,8 @@ export function mainMenuRows() {
     [L.LBL_STATUS, L.LBL_REPORT],
     [L.LBL_WEEKLY, L.LBL_BALANCE],
     [L.LBL_ACCOUNTS, L.LBL_DEVICES],
-    [L.LBL_ADD_ACCOUNT, L.LBL_RUN],
+    [L.LBL_ADD_ACCOUNT, L.LBL_CHECK_CRED],
+    [L.LBL_RUN],
     [L.LBL_START_ALL, L.LBL_STOP_ALL],
     [L.LBL_HELP],
     [L.LBL_HIDE],
@@ -235,6 +237,7 @@ export const HELP_TEXT = `CDT 流量守护 · 使用说明
 /accounts 按账号汇总流量与额度
 /weekly   查看最近 7 天流量周报
 /report   立即发送完整报表
+/creds    检查各账号访问密钥是否还有效
 /run      立即执行一次巡检
 /cancel   取消正在进行的操作（比如添加账号）
 /help     显示本条说明
@@ -247,10 +250,16 @@ export const HELP_TEXT = `CDT 流量守护 · 使用说明
   4. 点「全部加入监控」—— 自动配好，不用碰电脑
 原则：只新增，绝不动你已有的机器配置。
 
+关于「凭据体检」
+访问密钥失效后，那个账号下的机器就不再受保护（不会自动止损）。
+我每天会自动体检一次，一旦发现失效就立刻通知你。
+你也可以随时点「凭据体检」主动查 —— 它会逐个账号问阿里云
+「这对密钥还能用吗」，并告诉你哪几台机器受影响、该怎么修。
+
 关于「账号汇总」
 免费额度是按账号算的，一个账号下多台机器共享一份额度。
 所以「账号汇总」这一页比逐台看更准 ——
-它会把同一个 AccessKey 的机器合并计算，告诉你这个账号额度还剩多少。
+它会把同一个访问密钥的机器合并计算，告诉你这个账号额度还剩多少。
 
 注意
 · 界面文字不带任何英文，全部中文。
@@ -331,6 +340,11 @@ export async function handleCommand(env, config, token, chatId, text) {
 
     case 'report':
       await sendReport(env, config, token, chatId);
+      return;
+
+    case 'creds':
+      await tg.sendText(token, chatId, '正在逐个验证账号凭据，可能需要十几秒...');
+      await tg.sendText(token, chatId, await buildCredentialReport(config));
       return;
 
     case 'run':
@@ -491,6 +505,11 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
   }
   if (L.matchMain(raw, L.LBL_ADD_ACCOUNT)) {
     await startAddAccount(env, token, chatId);
+    return;
+  }
+  if (L.matchMain(raw, L.LBL_CHECK_CRED)) {
+    await tg.sendText(token, chatId, '正在逐个验证账号凭据，可能需要十几秒...');
+    await tg.sendText(token, chatId, await buildCredentialReport(config));
     return;
   }
   if (L.matchMain(raw, L.LBL_RUN)) {

@@ -195,6 +195,7 @@ export async function registerCommands(token) {
     { command: 'accounts', description: '按账号汇总额度占用' },
     { command: 'weekly', description: '查看最近 7 天流量周报' },
     { command: 'report', description: '立即发送完整报表' },
+    { command: 'creds', description: '检查各账号访问密钥是否有效' },
     { command: 'run', description: '立即执行一次巡检' },
     { command: 'cancel', description: '取消正在进行的操作（如添加账号）' },
     { command: 'help', description: '查看使用说明' },

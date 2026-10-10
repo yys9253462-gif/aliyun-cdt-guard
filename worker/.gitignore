@@ -15,6 +15,9 @@ node_modules/
 .config-payload.json
 .test-payload.json
 
+# 看运行日志时的临时落盘文件（wrangler tail 的输出中转）
+.tail-tmp.log
+
 # 配置文件的自动备份（改 KV id 时生成）
 wrangler.toml.bak-*
 

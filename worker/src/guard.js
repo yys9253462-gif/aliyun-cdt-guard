@@ -20,6 +20,7 @@
 import * as api from './aliyun-api.js';
 import * as common from './common.js';
 import { sendAlert } from './telegram.js';
+import { classifyError, ERR_CREDENTIAL } from './credential-error.js';
 
 /** 连续开机失败达到该次数后，降低重试频率 */
 const MAX_START_FAILURES = 3;
@@ -27,6 +28,17 @@ const MAX_START_FAILURES = 3;
 const RESOURCE_RETRY_COOLDOWN = 1800;
 /** 连续巡检失败达到该次数，发出「监控失明」告警 */
 const CHECK_FAILURE_ALERT_THRESHOLD = 3;
+/**
+ * 凭据类错误的提醒间隔（秒）—— 24 小时。
+ *
+ * 为什么凭据类要单独一条通道、而且**不受普通冷却压制**：
+ *   普通冷却（1 小时）是为「网络抖动」这类噪音设计的 —— 那种问题
+ *   等一会儿自己会好，报多了纯属骚扰。
+ *   但「AK 失效」不一样：**你不去换 Key，它就永远坏着**，
+ *   而这段时间里流量监控和自动止损**全程失效**（可能一直在扣钱）。
+ *   所以这类错误必须持续提醒 —— 每天一次，直到你处理掉。
+ */
+const CREDENTIAL_ALERT_COOLDOWN = 86400;
 /** 单实例巡检软超时（毫秒）—— 覆盖正常的开机等待时间 */
 const USER_CHECK_TIMEOUT_MS = 100000;
 /** 等待实例进入 Running 的轮询参数 */
@@ -328,15 +340,53 @@ async function enforceStop(user, config, state, name, key, trafficGb, status, li
   }
 }
 
-/** 连续巡检失败，发出「监控失明」告警 */
+/**
+ * 巡检失败的处理。
+ *
+ * 分两条路：
+ *
+ *   A. **凭据类错误**（AK 失效 / 权限不够 / Key 被删）
+ *      — 不处理就永远好不了，且期间监控全程失效。
+ *        单独走「高优先级」通道：**首次立刻报**，之后**每天提醒一次**，
+ *        不受普通 1 小时冷却压制。宁可烦一点，也不能让你在扣钱时毫不知情。
+ *
+ *   B. **暂时性错误**（网络抖动 / 限流）
+ *      — 等一会儿自己会好，按原来的「连续 3 次 + 1 小时冷却」处理，
+ *        避免刷屏。
+ *
+ * 两种情况都会把**中文原因**带上（走 credential-error.js 的统一识别），
+ * 而不是只贴阿里云的英文原话。
+ */
 async function handleCheckFailure(state, config, name, key, error, logger) {
-  const message = common.redact(error && error.message ? error.message : String(error));
+  const { kind, reason } = classifyError(error);
+  const message = common.sanitize(reason);
   logger(`[${name}] 巡检出错: ${message}`);
+
   const count = common.bumpCounter(state, key, 'check_failures');
+
+  if (kind === ERR_CREDENTIAL) {
+    // ---- A. 凭据类：高优先级，每天提醒一次，直到修好 ----
+    const eventKey = `${key}:cred_failed`;
+    if (common.eventAllowed(state, eventKey, 'cred_failed', CREDENTIAL_ALERT_COOLDOWN)) {
+      const msg = `机器: ${common.sanitize(name)}\n`
+        + `⚠️ 这对阿里云凭据出了问题，流量监控与自动止损当前处于失效状态。\n\n`
+        + `${message}\n\n`
+        + `怎么修：在 Telegram 里点「➕ 添加账号」重新填一份有效凭据，`
+        + `或点「🔑 凭据体检」查看所有账号的状态。\n`
+        + `（在你处理之前，本提醒每天会发一次。）`;
+      if (await sendAlert(config, '凭据失效（监控已中断）', msg, 'danger', logger)) {
+        common.markEvent(state, eventKey, 'cred_failed');
+        // 凭据问题解决了才该清这个标记，所以这里不动 check_failures 的冷却标记
+      }
+    }
+    return;
+  }
+
+  // ---- B. 暂时性 / 未知：沿用原有阈值 + 冷却 ----
   if (count >= CHECK_FAILURE_ALERT_THRESHOLD
       && common.eventAllowed(state, key, 'check_failed')) {
     const msg = `机器: ${common.sanitize(name)}\n` +
-      `已连续 ${count} 次巡检失败，最近错误: ${common.sanitize(message)}\n` +
+      `已连续 ${count} 次巡检失败，最近错误: ${message}\n` +
       `期间流量监控与自动止损处于失效状态，请人工确认实例情况。`;
     if (await sendAlert(config, '监控异常', msg, 'danger', logger)) {
       common.markEvent(state, key, 'check_failed');
@@ -386,6 +436,13 @@ async function checkOne(env, user, config, state, logger) {
 
     // 流量与状态都拿到了，说明监控是「睁眼」的，清掉失败计数
     common.clearCounter(state, key, 'check_failures');
+    // 同时清掉「凭据失效」标记 —— 否则修好之后标记还留着，
+    // 下次再出问题时会受 24 小时冷却影响而漏报。
+    // ⚠️ 注意键名：markEvent 写的是 `${key}:cred_failed` 这一层，
+    //    不是 `${key}` 这一层 —— 拿错层就清不掉（这个坑被测试抓到过）。
+    if (state[`${key}:cred_failed`]) {
+      delete state[`${key}:cred_failed`].cred_failed;
+    }
 
     // ---- 状态变化追踪（运行中 -> 已停止时报警）----
     // 必须在决策之前记录，否则自动开机一执行，就永远看不到「掉线」那一瞬。

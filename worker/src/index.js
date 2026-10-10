@@ -113,18 +113,20 @@ export default {
   /**
    * Cron 定时任务处理。
    *
-   * wrangler.toml 里配了两个触发器：
-   *   每 5 分钟  -> 巡检（流量判断 / 止损 / 自动开机）
-   *   每天 9:00  -> 发送每日报表
+   * wrangler.toml 里配了三个触发器：
+   *   每 5 分钟    -> 巡检（流量判断 / 止损 / 自动开机）
+   *   每天 9:00    -> 发送每日报表
+   *   每天 10:00   -> 凭据体检（只在发现坏凭据时推送）
    *
    * Cloudflare 传进来的 cron 字段就是触发时的表达式，据此分流。
    */
   async scheduled(event, env, ctx) {
     const cron = event?.cron || '';
 
-    // 日报触发器（cron 表达式里带 "9" 且不是 5 分钟那个）
-    // 用「不是巡检表达式」来判断更稳妥：巡检固定是每 5 分钟。
+    // 巡检固定是每 5 分钟，用「是不是这个表达式」来判断最稳妥。
     const isInspection = cron === '*\/5 * * * *' || cron === '*/5 * * * *';
+    // 凭据体检：每天 10 点（与 9 点的日报错开一小时，避免消息挤在一起）。
+    const isCredCheck = cron === '0 10 * * *';
 
     if (isInspection) {
       try {
@@ -133,6 +135,11 @@ export default {
       } catch (error) {
         console.log(`[cron] 巡检失败: ${common.redact(error)}`);
       }
+      return;
+    }
+
+    if (isCredCheck) {
+      await runCredentialCheckCron(env);
       return;
     }
 
@@ -153,6 +160,36 @@ export default {
     }
   },
 };
+
+/**
+ * 定时凭据体检。
+ *
+ * 只在**发现坏凭据**时才推消息 —— 每天推一句「一切正常」是纯噪音，
+ * 久了会连真告警一起被忽略。出问题才说话，消息才有分量。
+ */
+async function runCredentialCheckCron(env) {
+  try {
+    const token = String(env.TELEGRAM_BOT_TOKEN || '').trim();
+    const config = await common.loadConfig(env);
+    const chatId = config?.telegram?.chat_id;
+    if (!token || !chatId) {
+      console.log('[cron] 缺少机器人令牌或 Chat ID，跳过凭据体检');
+      return;
+    }
+
+    const { runScheduledCredentialCheck } = await import('./credential-check.js');
+    const result = await runScheduledCredentialCheck(config);
+
+    if (result.badCount > 0 && result.message) {
+      await tg.sendText(token, chatId, result.message);
+      console.log(`[cron] 凭据体检发现 ${result.badCount} 个失效账号，已推送`);
+    } else {
+      console.log('[cron] 凭据体检通过，无需推送');
+    }
+  } catch (error) {
+    console.log(`[cron] 凭据体检失败: ${common.redact(error)}`);
+  }
+}
 
 /**
  * 安装向导：注册命令菜单、回显 Webhook 状态、给出下一步指引。

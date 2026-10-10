@@ -27,6 +27,7 @@ export const LBL_START_ALL = '\u{1F680} 全部开机';        // 🚀
 export const LBL_STOP_ALL = '\u{1F6D1} 全部关机';         // 🛑
 export const LBL_DEVICES = '\u{2699}\u{FE0F} 单机操作';   // ⚙️
 export const LBL_ADD_ACCOUNT = '\u{2795} 添加账号';       // ➕
+export const LBL_CHECK_CRED = '\u{1F511} 凭据体检';       // 🔑
 export const LBL_RUN = '\u{1F504} 立即巡检';              // 🔄
 export const LBL_HELP = '\u{2139}\u{FE0F} 使用说明';      // ℹ️
 export const LBL_HIDE = '\u{274C} 收起菜单';              // ❌

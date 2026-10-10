@@ -21,6 +21,10 @@
 
 import * as common from './common.js';
 import * as api from './aliyun-api.js';
+import { credentialReason } from './credential-error.js';
+
+// 把识别逻辑再导出一次，方便调用方从本模块一并取用（实际实现在 credential-error.js）
+export { credentialReason };
 
 /**
  * 每一批并发查多少个地域。
@@ -133,35 +137,6 @@ export async function scanAccount(ak, sk) {
   });
 
   return { credential: CRED_OK, message: '', instances };
-}
-
-/**
- * 把接口抛出的错误翻译成「用户能看懂、并且知道该干什么」的中文原因。
- *
- * ⚠️ 关键点：**把阿里云的原话带上**。
- *    与其让我猜原因，不如让用户看到阿里云怎么说的 ——
- *    「InvalidAccessKeyId.NotFound」比「凭据错误」信息量大得多。
- */
-function credentialReason(error) {
-  const raw = common.sanitize(String((error && error.message) || error || ''));
-
-  // 逐类识别常见原因，给出针对性的下一步动作
-  if (/InvalidAccessKeyId|NotFound/i.test(raw)) {
-    return `${raw}\n\n这个 AccessKey ID 阿里云不认识。多半是复制时漏了字符，或这对 Key 已被删除。`;
-  }
-  if (/SignatureDoesNotMatch/i.test(raw)) {
-    return `${raw}\n\nSecret 不对（签名对不上）。多半是复制时漏了字符或多带了空格。`;
-  }
-  if (/Forbidden|no permission|not authorized|Ram/i.test(raw)) {
-    return `${raw}\n\n这把 Key 的权限不够。请在阿里云 RAM 里给它加上「ECS 只读」权限\n（AliyunECSReadOnlyAccess），否则扫不到机器。`;
-  }
-  if (/Throttl|FlowControl|TooManyRequests/i.test(raw)) {
-    return `${raw}\n\n请求太频繁被阿里云限流了。等一分钟再试一次。`;
-  }
-  if (/timeout|network|fetch failed|ENOTFOUND|ECONNREFUSED/i.test(raw)) {
-    return `${raw}\n\n连不上阿里云。可能是 Cloudflare 出口的临时问题，稍后再试。`;
-  }
-  return raw || '未知原因（阿里云没有返回具体说明）。';
 }
 
 /**
