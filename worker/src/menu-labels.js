@@ -14,28 +14,52 @@
  */
 
 // ---------------------------------------------------------------------------
-// 一级菜单（主菜单）—— 共 13 项，排成 7 行
+// 一级菜单（主菜单）—— 精简为 8 项，排成 4 行（+ 收起单独一行）
 // ---------------------------------------------------------------------------
-export const LBL_OVERVIEW = '\u{1F4CA} 总览';            // 📊
+// 🔴 精简原则（2026-10-11，用户反馈「好多功能都没用」）：
+//   删掉的全是**与其它项重复**的，而不是砍能力：
+//     · 「总览」    = 「实例状态」+「流量额度」一次发两条 → 合并进「状态总览」
+//     · 「实例状态」 → 并入「状态总览」
+//     · 「完整报表」 → 与「状态总览」内容高度重合，用 /report 命令保留
+//     · 「周报」    → 低频查看，用 /weekly 命令保留
+//     · 「余额详情」 → 与「账号汇总」重复（都查余额/账单），用 /balance 保留
+//     · 「账号汇总」 → 并入「流量额度」（页面里本来就有账号维度）
+//     · 「凭据体检」 → 巡检本身会盯凭据失效，用 /creds 命令保留
+//     · 「使用说明」 → 用 /help 命令保留（菜单里少一项，少一分误点）
+//   保留下来的都是**每天要用**的：看状态、看流量、管机器、加账号、
+//   调阈值、立即巡检。命令（/report /weekly /balance /creds /help）一个没少。
+export const LBL_STATUS_OVERVIEW = '\u{1F4CA} 状态总览';   // 📊
 export const LBL_TRAFFIC = '\u{1F4C8} 流量额度';          // 📈
+export const LBL_DEVICES = '\u{1F5A5} 单机操作';          // 🖥
+export const LBL_START_ALL = '\u{1F680} 全部开机';        // 🚀
+export const LBL_STOP_ALL = '\u{1F6D1} 全部关机';         // 🛑
+export const LBL_ADD_ACCOUNT = '\u{2795} 添加账号';       // ➕
+export const LBL_SET_LIMIT = '\u{1F39A} 设阈值';          // 🎚
+export const LBL_RUN = '\u{1F504} 立即巡检';              // 🔄
+export const LBL_HIDE = '\u{274C} 收起菜单';              // ❌
+
+// ---- 以下旧标签保留为常量，供「文字直输」与命令路由继续识别 ----
+// （菜单里不再显示，但用户手打「总览」「周报」等仍能命中，不算废掉功能）
+export const LBL_OVERVIEW = '\u{1F4CA} 总览';            // 📊
 export const LBL_STATUS = '\u{1F4E1} 实例状态';           // 📡
 export const LBL_REPORT = '\u{1F4CB} 完整报表';           // 📋
 export const LBL_WEEKLY = '\u{1F4C5} 周报';              // 📅
 export const LBL_BALANCE = '\u{1F4B0} 余额详情';          // 💰
 export const LBL_ACCOUNTS = '\u{1F3E6} 账号汇总';         // 🏦
-export const LBL_START_ALL = '\u{1F680} 全部开机';        // 🚀
-export const LBL_STOP_ALL = '\u{1F6D1} 全部关机';         // 🛑
-export const LBL_DEVICES = '\u{2699}\u{FE0F} 单机操作';   // ⚙️
-export const LBL_ADD_ACCOUNT = '\u{2795} 添加账号';       // ➕
 export const LBL_CHECK_CRED = '\u{1F511} 凭据体检';       // 🔑
-export const LBL_RUN = '\u{1F504} 立即巡检';              // 🔄
 export const LBL_HELP = '\u{2139}\u{FE0F} 使用说明';      // ℹ️
-export const LBL_HIDE = '\u{274C} 收起菜单';              // ❌
 
 // ---------------------------------------------------------------------------
 // 二级菜单
 // ---------------------------------------------------------------------------
 export const LBL_BACK_MAIN = '\u{1F3E0} 返回主菜单';      // 🏠
+
+// ---------------------------------------------------------------------------
+// 三级菜单（设阈值）—— 选机器 → 快捷档位 / 手动输入
+// ---------------------------------------------------------------------------
+export const LBL_BACK_PREV = '\u{1F519} 返回上一步';      // 🔙
+export const LBL_LIMIT_MANUAL = '\u{270F}\u{FE0F} 手动输入'; // ✏️
+export const LBL_LIMIT_PRESETS_TITLE = '选择新的流量阈值';
 
 // ---------------------------------------------------------------------------
 // 「添加阿里云账号」流程用到的按钮（二级/三级混合，都在流程内）

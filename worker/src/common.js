@@ -600,3 +600,61 @@ export async function clearWizard(env, chatId) {
   }
   await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
 }
+
+// ---------------------------------------------------------------------------
+// 「设阈值」流程状态
+// ---------------------------------------------------------------------------
+/**
+ * 记录「用户正在设阈值」这个状态。
+ *
+ * 为什么需要单独一个标记：
+ *   二级菜单里点一台机器，程序要判断**用户是从哪个入口进来的** ——
+ *   从「单机操作」进来要显示开机/关机菜单，从「设阈值」进来要显示阈值档位。
+ *   按钮文字都是「🖥 机器名 [尾号]」，长得一模一样，只能靠这个标记区分。
+ *
+ * 与 wizard 分开存，是为了不干扰「添加账号」流程的中间状态。
+ */
+export async function setLimitWizard(env, chatId, wizard) {
+  if (!bucket(env)) {
+    return;
+  }
+  const sessions = await loadSessions(env);
+  const key = String(chatId);
+  sessions[key] = Object.assign({}, sessions[key] || {}, {
+    limitWizard: Object.assign({}, wizard, { at: nowSeconds() }),
+  });
+  await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
+}
+
+/** 读取「设阈值」流程状态；不存在或超时（15 分钟）都返回 null */
+export async function getLimitWizard(env, chatId) {
+  const sessions = await loadSessions(env);
+  const record = sessions[String(chatId)] || {};
+  const wizard = record.limitWizard;
+  if (!wizard || typeof wizard !== 'object') {
+    return null;
+  }
+  const at = Number(wizard.at || 0);
+  if (nowSeconds() - at > WIZARD_TTL_SECONDS) {
+    await clearLimitWizard(env, chatId);
+    return null;
+  }
+  return wizard;
+}
+
+/** 清掉「设阈值」流程状态 */
+export async function clearLimitWizard(env, chatId) {
+  if (!bucket(env)) {
+    return;
+  }
+  const sessions = await loadSessions(env);
+  const key = String(chatId);
+  if (!sessions[key]) {
+    return;
+  }
+  delete sessions[key].limitWizard;
+  if (!Object.keys(sessions[key]).length) {
+    delete sessions[key];
+  }
+  await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
+}

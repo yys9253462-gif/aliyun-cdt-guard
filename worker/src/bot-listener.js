@@ -33,6 +33,7 @@ import {
   handleAddAccountStep,
 } from './add-account.js';
 import { buildCredentialReport } from './credential-check.js';
+import { parseTrafficLimit } from './guard.js';
 
 // ---------------------------------------------------------------------------
 // 权限校验
@@ -56,20 +57,61 @@ export function isAuthorized(config, chatId) {
  * 布局刻意做成两列 —— 整齐的方格观感，而且两列宽度比三列更宽松，
  * 中文按钮不会挤在一起换行。
  *
- * 14 项：前 7 行每行 2 个，最后「收起菜单」单独占一行（避免手滑点到）。
+ * 🔴 精简为 9 项（2026-10-11，用户反馈「好多功能都没用」）：
+ *    原 14 项里有一半是重复入口（总览=状态+流量、完整报表≈状态总览、
+ *    余额详情≈账号汇总）。精简后只留**每天真要用**的，
+ *    被去掉的能力全都还在，只是改为命令访问（/report /weekly /balance /creds /help）。
+ *
+ *    新增「🎚 设阈值」—— 之前只能在电脑上改配置，现在手机里就能调。
  */
 export function mainMenuRows() {
   return [
-    [L.LBL_OVERVIEW, L.LBL_TRAFFIC],
-    [L.LBL_STATUS, L.LBL_REPORT],
-    [L.LBL_WEEKLY, L.LBL_BALANCE],
-    [L.LBL_ACCOUNTS, L.LBL_DEVICES],
-    [L.LBL_ADD_ACCOUNT, L.LBL_CHECK_CRED],
-    [L.LBL_RUN],
+    [L.LBL_STATUS_OVERVIEW, L.LBL_TRAFFIC],
+    [L.LBL_DEVICES, L.LBL_SET_LIMIT],
     [L.LBL_START_ALL, L.LBL_STOP_ALL],
-    [L.LBL_HELP],
+    [L.LBL_ADD_ACCOUNT, L.LBL_RUN],
     [L.LBL_HIDE],
   ];
+}
+
+/**
+ * 「设阈值」二级菜单：列出所有机器，点一台进三级。
+ *
+ * 复用实例按钮格式（带实例 ID 尾段），保证同名机器也能精确选中。
+ */
+export function limitDeviceRows(config) {
+  const rows = [];
+  for (const user of (config?.users || []).slice(0, 20)) {
+    const name = String(user?.name || user?.instance_id || '').trim();
+    rows.push([L.buildDeviceButton(name, Boolean(user?.paused), user?.instance_id)]);
+  }
+  rows.push([L.LBL_BACK_MAIN]);
+  return rows;
+}
+
+/**
+ * 「设阈值」三级菜单：对某台机器给快捷档位 + 手动输入。
+ *
+ * 档位按「海外免费 200GB / 内地免费 20GB」两种场景各给几个常用值，
+ * 避免用户还要心算「设多少才安全」。
+ */
+export function limitPresetRows(user) {
+  const current = Number(user?.traffic_limit);
+  const cur = Number.isFinite(current) && current > 0 ? current : 180;
+  // 六个常用档位：留足安全余量 + 贴近免费额度 + 当前值（方便回看）
+  const presets = [50, 100, 150, 180, 190, 200];
+  const rows = [];
+  // 每行两个档位按钮
+  for (let i = 0; i < presets.length; i += 2) {
+    const pair = presets.slice(i, i + 2).map((gb) => {
+      const mark = gb === cur ? '\u{2705} ' : '';   // ✅ 标出当前值
+      return `${mark}${gb}GB`;
+    });
+    rows.push(pair);
+  }
+  rows.push([L.LBL_LIMIT_MANUAL]);
+  rows.push([L.LBL_BACK_PREV, L.LBL_BACK_MAIN]);
+  return rows;
 }
 
 /** 二级菜单：实例列表。每台机器一行，加一个「返回主菜单」。 */
@@ -320,6 +362,12 @@ export const HELP_TEXT = `CDT 流量守护 · 使用说明
 
 按钮就是快捷输入 —— 点一下等于替你发一句话，机器人再按这句话执行。
 
+设置流量阈值（手机里就能改）
+点菜单里的「设阈值」→ 选一台机器 → 选一个新阈值。
+每个档位都标了当前值（✅），也可以点「手动输入」直接发一个数字。
+阈值含义：当月流量达到这个数就**强制关机止损**。
+建议设在免费额度以内（非中国内地 200GB / 中国内地 20GB），超了才会花钱。
+
 命令
 /menu     显示操作菜单
 /status   查看所有机器实时状态
@@ -330,8 +378,11 @@ export const HELP_TEXT = `CDT 流量守护 · 使用说明
 /report   立即发送完整报表
 /creds    检查各账号访问密钥是否还有效
 /run      立即执行一次巡检
-/cancel   取消正在进行的操作（比如添加账号）
+/cancel   取消正在进行的操作（比如添加账号、设阈值）
 /help     显示本条说明
+
+说明：菜单里只放最常用的功能；上面的命令对应能力都还在，
+低频功能（周报 / 完整报表 / 余额 / 凭据体检 / 说明）改为命令访问。
 
 添加阿里云账号（在手机里就能做）
 点菜单里的「添加账号」，然后按提示走：
@@ -394,6 +445,114 @@ export async function sendDeviceActions(token, chatId, user) {
 }
 
 // ---------------------------------------------------------------------------
+// 「设阈值」菜单
+// ---------------------------------------------------------------------------
+/** 二级：选要调阈值的机器。 */
+export async function sendLimitDeviceList(token, chatId, config) {
+  const users = config?.users || [];
+  if (!users.length) {
+    await tg.sendMenu(token, chatId, '当前没有配置任何机器。', [[L.LBL_BACK_MAIN]]);
+    return;
+  }
+  await tg.sendMenu(
+    token, chatId,
+    '设置流量阈值\n\n选一台机器，再选新的阈值：',
+    limitDeviceRows(config)
+  );
+}
+
+/** 三级：对某台机器选阈值档位。 */
+export async function sendLimitPresets(token, chatId, user) {
+  const name = common.sanitize(user?.name || user?.instance_id);
+  const parsed = parseTrafficLimit(user?.traffic_limit);
+  const limit = parsed.limitGb;
+  const region = String(user?.region || '');
+  const freeGb = api.getFreeQuotaGb(region);
+  const freeCn = api.isOverseasRegion(region) ? '非中国内地' : '中国内地';
+
+  const lines = [
+    `· ${name}`,
+    `当前阈值: ${limit}GB`,
+    `本区域免费额度: ${freeGb}GB（${freeCn}）`,
+    '',
+  ];
+  // 给一句人话提示：阈值与免费额度的关系
+  if (limit > freeGb) {
+    lines.push(`⚠️ 当前阈值高于免费额度，超出部分会真实产生费用。`);
+  } else {
+    lines.push(`建议设在免费额度以内（如 ${Math.max(freeGb - 20, 1)}GB），超了才会花钱。`);
+  }
+  if (parsed.invalid) {
+    lines.push(`（原阈值不合法：${parsed.invalid}，已按默认 ${limit}GB 处理）`);
+  }
+  lines.push('');
+  lines.push('选一个新的阈值：');
+
+  await tg.sendMenu(token, chatId, lines.join('\n'), limitPresetRows(user));
+}
+
+/**
+ * 解析用户在「设阈值」流程里发的档位文字（如「150GB」「✅ 180GB」「手动输入」）。
+ *
+ * @returns {number|null|'manual'}
+ *   · 数字  —— 识别出的新阈值（GB）
+ *   · 'manual' —— 用户点了「手动输入」，进入等待输入状态
+ *   · null  —— 不是阈值相关输入
+ */
+export function parseLimitChoice(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  if (L.matchMain(text, L.LBL_LIMIT_MANUAL)) return 'manual';
+  // 「✅ 180GB」/「180GB」/「180 gb」/「180」都能识别
+  const m = text.replace(/[\u2705\u{FE0F}\s]/gu, '').match(/^(\d+(?:\.\d+)?)\s*(?:gb|g)?$/i);
+  if (m) {
+    const num = Number(m[1]);
+    return Number.isFinite(num) && num > 0 ? num : null;
+  }
+  return null;
+}
+
+/**
+ * 把某台机器的阈值改成 newLimit（GB）。返回给用户的结果说明。
+ *
+ * 🔴 会校验合法性：不合法直接拒绝并说明，绝不写入坏值。
+ *    理由见 guard.js 的 parseTrafficLimit 长注释 —— 阈值一旦变成 0/负数，
+ *    下游判断会变成「流量 < 0」永假 → 每 5 分钟强制关机一次。
+ */
+export async function setDeviceLimit(env, config, instanceId, newLimit) {
+  const user = findUserById(config, instanceId);
+  if (!user) return '没找到这台机器。';
+
+  const parsed = parseTrafficLimit(newLimit);
+  if (parsed.invalid) {
+    return `阈值不合法（${parsed.invalid}），已取消，未做修改。\n请输入一个 5–2000 之间的数字，例如 180。`;
+  }
+  // 再兜一道上下限：太小会误关机，太大等于不设防
+  const gb = parsed.limitGb;
+  if (gb < 5 || gb > 2000) {
+    return `阈值 ${gb}GB 超出合理范围（5–2000GB），已取消，未做修改。`;
+  }
+
+  const name = common.sanitize(user.name || instanceId);
+  const oldGb = parseTrafficLimit(user.traffic_limit).limitGb;
+  user.traffic_limit = gb;
+  await common.saveConfig(env, config);
+
+  const region = String(user.region || '');
+  const freeGb = api.getFreeQuotaGb(region);
+  const lines = [
+    `已把 ${name} 的流量阈值改为 ${gb}GB（原 ${oldGb}GB）。`,
+    '',
+    `本区域免费额度 ${freeGb}GB —— 超了才会花钱。`,
+  ];
+  if (gb > freeGb) {
+    lines.push(`⚠️ 注意：新阈值高于免费额度，进入付费阶梯后不会自动停，会一直扣到 ${gb}GB 才关。`);
+  }
+  lines.push('下一轮巡检（最长 5 分钟）就会按新阈值执行。');
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // 命令处理
 // ---------------------------------------------------------------------------
 export async function handleCommand(env, config, token, chatId, text) {
@@ -447,12 +606,15 @@ export async function handleCommand(env, config, token, chatId, text) {
       return;
 
     case 'cancel':
-      // 取消正在进行的多步流程（目前只有「添加账号」）
+      // 取消正在进行的多步流程（「添加账号」或「设阈值」）
       // 注意：/cancel 是命令（以 / 开头），走的是 handleCommand 这条路，
       // 而流程的文字处理在 handlePlainText 里，所以这里必须单独接一下。
       if (await common.getWizard(env, chatId)) {
         await common.clearWizard(env, chatId);
         await tg.sendText(token, chatId, '已取消当前操作，没有改动任何配置。');
+      } else if (await common.getLimitWizard(env, chatId)) {
+        await common.clearLimitWizard(env, chatId);
+        await tg.sendText(token, chatId, '已取消设置阈值，没有改动任何配置。');
       } else {
         await tg.sendText(token, chatId, '当前没有进行中的操作。');
       }
@@ -593,6 +755,38 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
     return;
   }
 
+  // ---- 【高优先级】「设阈值」手动输入：用户正在直接发一个数字 ----
+  // 必须放在菜单匹配之前，否则「180」会被判成「没听懂」。
+  const limitWizard = await common.getLimitWizard(env, chatId);
+  if (limitWizard && limitWizard.step === 'manual') {
+    const currentKey = await common.getCurrentDevice(env, chatId);
+    const target = resolveCurrentDevice(config, currentKey);
+    if (!target) {
+      await common.clearLimitWizard(env, chatId);
+      await tg.sendText(token, chatId, '这台机器已不在配置里，流程已取消。');
+      return;
+    }
+    const num = parseLimitChoice(raw);
+    if (typeof num === 'number') {
+      const result = await setDeviceLimit(env, config, target.instance_id, num);
+      await common.clearLimitWizard(env, chatId);
+      await tg.sendText(token, chatId, result);
+      await sendMainMenu(token, chatId);
+      return;
+    }
+    // 用户发的不是数字 —— 提示一下，但**保持流程不退出**，方便他重发
+    if (String(raw).startsWith('/')) {
+      // 命令交给下面正常处理（例如 /cancel 取消）
+    } else {
+      await tg.sendText(
+        token, chatId,
+        `「${common.sanitize(raw).slice(0, 20)}」不是一个有效数字。\n` +
+        '请发一个 5–2000 之间的数字（单位 GB），例如 180。\n发送 /cancel 可以取消。'
+      );
+      return;
+    }
+  }
+
   // ---- 收起菜单 ----
   if (L.matchMain(raw, L.LBL_HIDE)) {
     await tg.hideMenu(token, chatId);
@@ -600,17 +794,16 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
   }
 
   // ---- 一级菜单 ----
-  if (L.matchMain(raw, L.LBL_OVERVIEW)) {
+  // 「状态总览」= 老「总览」+「实例状态」的合并（一次发两条）
+  if (L.matchMain(raw, L.LBL_STATUS_OVERVIEW) || L.matchMain(raw, L.LBL_OVERVIEW)
+      || L.matchMain(raw, L.LBL_STATUS)) {
     await tg.sendText(token, chatId, await buildStatus(config));
     await tg.sendText(token, chatId, await buildTraffic(config));
     return;
   }
+  // 「流量额度」现在连账号维度一起给（老「账号汇总」已并入）
   if (L.matchMain(raw, L.LBL_TRAFFIC)) {
     await tg.sendText(token, chatId, await buildTraffic(config));
-    return;
-  }
-  if (L.matchMain(raw, L.LBL_STATUS)) {
-    await tg.sendText(token, chatId, await buildStatus(config));
     return;
   }
   if (L.matchMain(raw, L.LBL_REPORT)) {
@@ -641,6 +834,11 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
   }
   if (L.matchMain(raw, L.LBL_DEVICES)) {
     await sendDeviceList(token, chatId, config);
+    return;
+  }
+  if (L.matchMain(raw, L.LBL_SET_LIMIT)) {
+    await common.setLimitWizard(env, chatId, { step: 'pick' });
+    await sendLimitDeviceList(token, chatId, config);
     return;
   }
   if (L.matchMain(raw, L.LBL_ADD_ACCOUNT)) {
@@ -702,7 +900,56 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
     //    存名字会导致两台同名前缀的机器互相串台，甚至删错机器。
     //    详见 resolveCurrentDevice 的注释。
     await common.setCurrentDevice(env, chatId, user.instance_id || '');
+
+    // 区分「从哪个入口进来的这台机器」：
+    //   · 设阈值入口 → 给阈值档位菜单
+    //   · 单机操作入口 → 给操作菜单
+    if (await common.getLimitWizard(env, chatId)) {
+      await sendLimitPresets(token, chatId, user);
+      return;
+    }
     await sendDeviceActions(token, chatId, user);
+    return;
+  }
+
+  // ---- 三级菜单（设阈值）：档位 / 手动输入 ----
+  if (await common.getLimitWizard(env, chatId)) {
+    const currentKey = await common.getCurrentDevice(env, chatId);
+    const current = resolveCurrentDevice(config, currentKey);
+    if (!current) {
+      await common.clearLimitWizard(env, chatId);
+      await tg.sendText(token, chatId, '这台机器已不在配置里，流程已取消。');
+      await sendMainMenu(token, chatId);
+      return;
+    }
+    if (L.matchMain(raw, L.LBL_BACK_PREV)) {
+      await common.clearLimitWizard(env, chatId);
+      await sendLimitDeviceList(token, chatId, config);
+      return;
+    }
+    const choice = parseLimitChoice(raw);
+    if (choice === 'manual') {
+      // 进入「等用户直接发一个数字」的状态，保持 limitWizard
+      await common.setLimitWizard(env, chatId, { step: 'manual' });
+      await tg.sendText(
+        token, chatId,
+        '请直接发一个数字（单位 GB），例如 180。\n发送 /cancel 可以取消。'
+      );
+      return;
+    }
+    if (typeof choice === 'number') {
+      const result = await setDeviceLimit(env, config, current.instance_id, choice);
+      await common.clearLimitWizard(env, chatId);
+      await tg.sendText(token, chatId, result);
+      await sendMainMenu(token, chatId);
+      return;
+    }
+    // 没匹配上任何档位
+    await tg.sendText(
+      token, chatId,
+      '没看懂这个阈值。请点上面的档位，或点「手动输入」直接发一个数字。'
+    );
+    await sendLimitPresets(token, chatId, current);
     return;
   }
 
