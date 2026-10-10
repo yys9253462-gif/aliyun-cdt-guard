@@ -408,9 +408,24 @@ collect_one_instance() {
     fi
 
     echo ""
-    echo "【流量熔断阈值】单位 GB。CDT 每月有免费额度，超过会开始扣费。"
-    echo "  举例：免费额度 200GB，填 180 表示用到 180GB 就自动关机，留 20GB 缓冲。"
-    LIMIT=$(ask "关机阈值（GB）" "180")
+    echo "【流量熔断阈值】单位 GB。"
+    echo "  阿里云 CDT 每月给的免费公网流量额度是："
+    echo "    中国内地地域  20 GB/月"
+    echo "    非中国内地地域 200 GB/月（含中国香港、新加坡、菲律宾、日本、美国、欧洲等）"
+    echo "  这是**按账号统一计算**的，不是每台机器各有一份。"
+    echo -e "  ${YELLOW}注意：超过免费额度就开始按量计费，不是「离得远就免费」。${NC}"
+    echo "  建议填得比免费额度低一些，留点缓冲，例如免费 200GB 就填 180GB。"
+    local free_hint="180"
+    case "$REGION" in
+        cn-hangzhou|cn-shanghai|cn-beijing|cn-shenzhen|cn-guangzhou|cn-qingdao|cn-zhangjiakou|cn-huhehaote|cn-wulanchabu|cn-chengdu|cn-nanjing|cn-heyuan|cn-wuhan*)
+            free_hint="18"
+            echo -e "  ${CYAN}你选的是中国内地地域，免费额度 20GB，建议阈值填 18 左右。${NC}"
+            ;;
+        *)
+            echo -e "  ${CYAN}你选的是非中国内地地域，免费额度 200GB，建议阈值填 180 左右。${NC}"
+            ;;
+    esac
+    LIMIT=$(ask "关机阈值（GB）" "$free_hint")
 
     echo ""
     echo "【资源组 ID】仅当你的 RAM 用户被限制在某个资源组内时才需要填，否则直接回车。"

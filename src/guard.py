@@ -84,6 +84,23 @@ def check_one(user, config, state):
     ak, sk, region = user['ak'], user['sk'], user['region']
     limit_gb = float(user.get('traffic_limit', 180))
 
+    # 安全护栏：若关机阈值高于本月免费额度，则超出的部分会真实产生费用。
+    # 每人每账号每月免费额度：非中国内地 200GB、中国内地 20GB。
+    # 这种情况必须提醒 —— 否则老大可能误以为「还没到阈值=不花钱」。
+    free_gb = aliyun_api.get_free_quota_gb(region)
+    if limit_gb > free_gb:
+        warn_key = '%s:quota_warn' % key
+        if common.event_allowed(state, warn_key, 'quota_warn', common.OVERLIMIT_COOLDOWN):
+            msg = ('机器: %s\n'
+                   '关机阈值设为 %.0fGB，但本区域免费额度只有 %.0fGB/月。\n'
+                   '超出 %.0fGB 的部分会真实产生费用，阈值内也可能在花钱。\n'
+                   '建议把阈值设到免费额度以内（例如 %.0fGB）。'
+                   % (name, limit_gb, free_gb, limit_gb - free_gb, max(free_gb - 20, 1)))
+            LOG.warning('[%s] 阈值 %.0fGB 高于免费额度 %.0fGB，存在付费风险',
+                        name, limit_gb, free_gb)
+            if send_alert(config, '流量阈值高于免费额度', msg, 'warn', LOG):
+                common.mark_event(state, warn_key, 'quota_warn')
+
     try:
         traffic_gb = aliyun_api.get_cdt_traffic_gb(ak, sk, region)
         status = aliyun_api.get_instance_status(ak, sk, region, instance_id, resource_group)

@@ -134,6 +134,73 @@ def get_cdt_traffic_gb(ak, sk, region='cn-hangzhou'):
     return total_bytes / (1024 ** 3)
 
 
+# CDT 免费额度（按账号统一计算，各产品共享）：
+#   中国内地地域 20 GB/月 + 非中国内地地域 200 GB/月 = 合计 220 GB/月
+# 注意：这是「免费」额度，不是计费阶梯上界。超出后进入付费阶梯。
+# 接口返回的 HighestTraffic（10TiB）是**第一档计费阶梯的上界**，与免费无关，
+# 切勿拿它当免费额度 —— 那会严重高估可用量。
+FREE_QUOTA_MAINLAND_GB = 20.0
+FREE_QUOTA_OVERSEAS_GB = 200.0
+
+# 亚太大区前缀（非中国内地）
+_OVERSEAS_PREFIXES = ('ap-', 'us-', 'eu-', 'me-', 'na-', 'sa-', 'cn-hongkong')
+
+
+def is_overseas_region(region):
+    """判断地域是否属于「非中国内地」（影响免费额度是 200GB 还是 20GB）。
+
+    中国内地地域形如 cn-hangzhou / cn-shanghai；
+    而中国香港是 cn-hongkong —— 它属于非内地，享 200GB。
+    """
+    rid = (region or '').strip().lower()
+    if not rid:
+        return False
+    if rid == 'cn-hongkong':
+        return True
+    for prefix in _OVERSEAS_PREFIXES:
+        if rid.startswith(prefix):
+            return True
+    return False
+
+
+def get_free_quota_gb(region):
+    """按地域返回该账号在本月的 CDT 免费额度（GB）。"""
+    return FREE_QUOTA_OVERSEAS_GB if is_overseas_region(region) else FREE_QUOTA_MAINLAND_GB
+
+
+def get_cdt_traffic_detail(ak, sk, region='cn-hangzhou'):
+    """查询 CDT 流量明细，返回结构化信息（用于日报展示是否已进入付费区）。
+
+    返回 dict：
+        traffic_gb   本月已用流量（GB）
+        free_gb      免费额度（GB）
+        tier_max_gb  第一档阶梯上界（GB，仅供了解计费结构，不是免费量）
+        over_free    是否已超出免费额度（超出即开始计费）
+    """
+    client = build_client(ak, sk, CDT_REGION)
+    request = _common_request(CDT_ENDPOINT, CDT_VERSION, 'ListCdtInternetTraffic')
+    raw = _do(client, request)
+    data = json.loads(raw.decode('utf-8'))
+
+    total_bytes = 0
+    tier_max_bytes = 0
+    for item in data.get('TrafficDetails', []):
+        total_bytes += item.get('Traffic', 0)
+        for tier in item.get('TrafficTierDetails', []) or []:
+            highest = tier.get('HighestTraffic') or 0
+            if highest > tier_max_bytes:
+                tier_max_bytes = highest
+
+    traffic_gb = total_bytes / (1024 ** 3)
+    free_gb = get_free_quota_gb(region)
+    return {
+        'traffic_gb': traffic_gb,
+        'free_gb': free_gb,
+        'tier_max_gb': tier_max_bytes / (1024 ** 3),
+        'over_free': traffic_gb >= free_gb,
+    }
+
+
 def get_instance_status(ak, sk, region, instance_id, resource_group=''):
     """查询实例状态，返回 Running / Stopped / Starting 等；找不到实例返回 None。"""
     client = build_client(ak, sk, region)

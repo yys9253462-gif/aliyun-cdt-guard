@@ -21,7 +21,21 @@ def _traffic_line(traffic_gb, quota):
     if traffic_gb < 0:
         return '查询失败', 0.0
     percent = (traffic_gb / quota * 100) if quota > 0 else 0.0
-    return '%.2f GB (%.1f%%)' % (traffic_gb, percent), percent
+    return '%.2f GB (阈值的 %.1f%%)' % (traffic_gb, percent), percent
+
+
+def _free_quota_line(traffic_gb, region):
+    """生成「免费额度」提示行 —— 让老大清楚距离开始收费还有多少。"""
+    if traffic_gb < 0:
+        return None, ''
+    free_gb = aliyun_api.get_free_quota_gb(region)
+    area = '非中国内地' if aliyun_api.is_overseas_region(region) else '中国内地'
+    remain = free_gb - traffic_gb
+    if remain >= 0:
+        tip = '免费额度剩 %.2f GB' % remain
+        return '  免费额度: %.0f GB/月（%s）→ %s' % (free_gb, area, tip), 'ok'
+    return ('  免费额度: %.0f GB/月（%s）→ 已超出 %.2f GB，超出部分开始计费'
+            % (free_gb, area, -remain)), 'over'
 
 
 def _money(amount, currency, default_symbol='$'):
@@ -88,6 +102,9 @@ def build_report(config):
         lines.append('  状态: %s' % status_icon)
         lines.append('  公网IP: %s' % detail['ip'])
         lines.append('  流量: %s / 阈值 %.0fGB' % (traffic_str, quota))
+        free_line, free_state = _free_quota_line(traffic_gb, region)
+        if free_line:
+            lines.append(free_line)
         lines.append('  本月账单: %s' % _money(bill_amount, bill_currency, user.get('currency', '$')))
         lines.append('  账户余额: %s' % _money(balance_amount, balance_currency, user.get('currency', '$')))
         lines.append('  评价: %s' % verdict)
