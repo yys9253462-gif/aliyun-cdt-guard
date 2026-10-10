@@ -114,9 +114,14 @@ class TestBot(unittest.TestCase):
 
         # 替换发送与回应
         self._orig_send = bot.send_text
+        self._orig_send_menu = bot.send_menu
         self._orig_answer = bot.answer_callback
         bot.send_text = lambda token, chat_id, text, keyboard=None: (
             self.sent.append(SentMessage(chat_id, text, keyboard)) or True)
+        # 新版 /menu 用的是回复键盘（send_menu），这里一并拦住，
+        # 否则「发 /menu 有没有回应」这类断言会误判成失败。
+        bot.send_menu = lambda token, chat_id, text, rows, placeholder='': (
+            self.sent.append(SentMessage(chat_id, text, rows)) or True)
         bot.answer_callback = lambda token, cid, text='': self.answered.append(
             {'id': cid, 'text': text})
 
@@ -161,6 +166,7 @@ class TestBot(unittest.TestCase):
 
     def tearDown(self):
         bot.send_text = self._orig_send
+        bot.send_menu = self._orig_send_menu
         bot.answer_callback = self._orig_answer
         aliyun_api.start_instance = self._orig_start
         aliyun_api.stop_instance = self._orig_stop

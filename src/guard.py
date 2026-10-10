@@ -266,6 +266,10 @@ def check_one(user, config, state):
         # ---- 余额 / 账单告警 ----
         _check_money(user, config, state, name, key)
 
+        # ---- 记录流量台账（周报数据源）----
+        # 按天去重，同一天只留最新一条，不会把磁盘写爆。
+        common.append_traffic_history(instance_id, name, traffic_gb, LOG)
+
         if traffic_gb < limit_gb:
             if status == 'Stopped':
                 _try_start(user, config, state, name, key, traffic_gb)

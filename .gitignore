@@ -4,6 +4,7 @@ venv/
 .venv-test/
 config.json
 state.json
+traffic_history.json
 *.log
 bot.lock
 guard.lock

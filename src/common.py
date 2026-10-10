@@ -19,6 +19,10 @@ BASE_DIR = os.environ.get('CDT_GUARD_DIR', '/opt/cdt-guard')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 STATE_FILE = os.path.join(BASE_DIR, 'state.json')
 LOCK_FILE = os.path.join(BASE_DIR, 'guard.lock')
+# 流量历史台账：巡检每轮追加一条，供周报统计使用
+HISTORY_FILE = os.path.join(BASE_DIR, 'traffic_history.json')
+# 台账最多保留多少天（超过自动裁掉，防止文件无限增长）
+HISTORY_KEEP_DAYS = 60
 
 # 通知冷却：同一事件 1 小时内不重复发送
 NOTIFY_COOLDOWN = 3600
@@ -135,6 +139,65 @@ def bump_counter(state, key, counter, step=1):
 
 def clear_counter(state, key, counter):
     state.setdefault(key, {}).pop(counter, None)
+
+
+# ----------------------------------------------------------------------------
+# 流量历史台账（周报数据源）
+# ----------------------------------------------------------------------------
+def append_traffic_history(instance_id, name, traffic_gb, logger=None):
+    """记录一次流量快照，供周报统计使用。
+
+    设计取舍：
+        每次巡检（5 分钟）都追加一条会让文件膨胀得很快（一天 288 条 × 台数）。
+        所以同一台机器**同一天只保留最新一条**，粒度按天 —— 周报看的是
+        每日用量趋势，5 分钟级精度既没必要也浪费磁盘。
+
+    文件格式：一个 JSON 数组，每项形如
+        {"instance_id": "...", "name": "...", "date": "2026-10-10",
+         "time": "14:35", "traffic_gb": 0.14}
+    """
+    if traffic_gb is None or traffic_gb < 0:
+        return
+    now = now_local()
+    day = now.strftime('%Y-%m-%d')
+    record = {
+        'instance_id': instance_id,
+        'name': name,
+        'date': day,
+        'time': now.strftime('%H:%M'),
+        'traffic_gb': round(float(traffic_gb), 4),
+    }
+
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as fp:
+                history = json.load(fp)
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+
+    # 同一天同一台机器只留最新一条
+    history = [item for item in history
+               if not (item.get('instance_id') == instance_id
+                       and item.get('date') == day)]
+    history.append(record)
+
+    # 裁掉过老的记录，防止文件无限增长
+    import datetime
+    cutoff = (now - datetime.timedelta(days=HISTORY_KEEP_DAYS)).strftime('%Y-%m-%d')
+    history = [item for item in history if str(item.get('date', '')) >= cutoff]
+    history.sort(key=lambda item: (str(item.get('date', '')), str(item.get('time', ''))))
+
+    try:
+        tmp = HISTORY_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fp:
+            json.dump(history, fp, ensure_ascii=False, indent=2)
+        os.replace(tmp, HISTORY_FILE)
+    except Exception as error:
+        if logger:
+            logger.error('写入流量台账失败: %s', error)
 
 
 # ----------------------------------------------------------------------------
