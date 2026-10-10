@@ -89,12 +89,6 @@ local_node_bindir() {
   fi
 }
 
-# 先看本地自动装的，再看系统里的
-preflight_node() {
-  preflight_use_local_node 2>/dev/null || true
-  command -v node >/dev/null 2>&1
-}
-
 # 从 nodejs.org 拉最新 LTS 的版本号
 # 输出：如 v22.11.0；失败输出空串
 #

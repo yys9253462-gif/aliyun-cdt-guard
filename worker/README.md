@@ -34,15 +34,22 @@
 
 ### ② 双击启动器
 
-解压安装包后，文件夹里有个 **`安装.ps1`** —— **右键 → 使用 PowerShell 运行**。
+解压安装包后，文件夹里有个 **`启动.bat`** —— **双击它就行**。
 
-它会自动找到 Git Bash 并打开中文菜单。三种情况：
+> **为什么不是双击 `安装.ps1`？**
+> Windows 对 `.ps1` 的默认动作是「用记事本打开」，不是「运行」。
+> 新手双击后看到一屏代码，会以为工具坏了。所以包里额外放了一个
+> `启动.bat` 垫片 —— `.bat` 双击才会真的执行，它再自动去调 `安装.ps1`。
+> 两个文件都在包内，**双击 `启动.bat` 即可**。
+
+它会自动找到 Git Bash 并打开中文菜单。四种情况：
 
 | 情况 | 表现 |
 |---|---|
 | 环境齐全 | 直接进菜单 |
 | 没装 Git Bash | 打印安装指引（含 `winget` 命令 + 官网链接），可一键打开下载页 |
 | 提示脚本被禁用 | 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试 |
+| 只想用 `安装.ps1` | 也可以，但要 **右键 → 使用 PowerShell 运行**，不能直接双击 |
 
 > **为什么用 `.ps1` 而不是 `.bat`**：cmd.exe 按 GBK 解码 `.bat`，
 > 而文件是 UTF-8 —— 中文全变乱码，乱码还会被当命令执行。
@@ -254,7 +261,8 @@ bash menu.sh status        # 只看当前状态
 
 ## 当前部署状态
 
-已部署在 `https://cdt-guard.yys9253462.workers.dev`，**端到端全链路验证通过**：
+本项目已在真实环境跑通**端到端全链路验证**，结果如下（你自己的部署跑完后，
+可以用 `node tests/test-integration.mjs` 得到同样的自检结果）：
 
 | 检查项 | 状态 |
 |---|---|
@@ -293,12 +301,21 @@ bash menu.sh status        # 只看当前状态
 bash tests/run-all.sh
 ```
 
-**513 项检查**（菜单文案 41 + 命令注册 14 + 集成 118 + 添加账号流程 136
-+ 凭据失效处理 85 + 部署脚本 108），
+**626 项检查**（菜单文案 46 + 命令注册 14 + 集成 119 + 添加账号流程 136
++ 凭据失效处理 85 + 巡检回执 18 + 机器身份定位 19 + 额度与阈值 36
++ 部署脚本 125 + 启动器 18），
 不联网、不需要密钥、**不写任何线上数据**。
 
-启动器另有一份独立测试（11 项，PowerShell 运行），验证「找得到 / 找不到 Git Bash」
-两条分支、中文往返、退出码透传是否正常：
+其中三组专门盯「不报错但会算错 / 会做错」的隐蔽问题，值得单独说明：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `test-quota-limit.mjs` | 免费额度**按账号算不按台累加**；关机阈值非法时**绝不关机** |
+| `test-device-identity.mjs` | 两台同名前缀机器**不能串台**（否则会删错机器） |
+| `test-inspection-reply.mjs` | 回执里**不得出现 `[object Object]`**；失败不能显示成成功 |
+
+启动器另有一份独立测试（PowerShell 运行），验证「找得到 / 找不到 Git Bash」
+两条分支、中文往返、退出码透传、以及 `.bat` 垫片的换行与编码是否正常：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/test-launcher.ps1
@@ -344,16 +361,20 @@ src/
   views.js            各页面文本构建
   account-summary.js  按账号汇总
 tests/
-  run-all.sh              一键跑全部自检（513 项）
+  run-all.sh              一键跑全部自检（626 项）
   test-menu-labels.mjs    菜单文案 41 项（含设备名截断 + Python 转义扫描）
   test-commands.mjs       命令注册一致性 14 项（两份清单比对）
   test-integration.mjs    集成 118 项（含假 KV 实现）
   test-add-account.mjs    添加账号流程 136 项（含地域中文名 / 自动命名 / 删机器）
   test-credential.mjs     凭据失效处理 85 项（分类 / 告警按钮 / 清理 / 体检）
+  test-inspection-reply.mjs  巡检回执文案 18 项（不得出现 [object Object]）
+  test-device-identity.mjs   机器身份定位 19 项（同名前缀不串台）
+  test-quota-limit.mjs    额度口径与关机阈值 36 项（额度按账号 / 阈值非法不关机）
   test-scripts.sh         部署脚本 108 项（结构、安全、演练模式、菜单）
-  test-launcher.ps1       Windows 启动器 11 项（PowerShell）
+  test-launcher.ps1       Windows 启动器测试（同时覆盖 .bat 垫片）
 menu.sh               交互式主菜单（唯一入口，推荐）
-安装.ps1              Windows 双击启动器（找 Git Bash → 开菜单，找不到给指引）
+启动.bat              Windows 双击这个（垫片：再自动调 安装.ps1）
+安装.ps1              Windows 启动器本体（找 Git Bash → 开菜单，找不到给指引）
 deploy.sh             一键部署（也可被 menu.sh 调用）
 configure.sh          机器清单配置 + 添加账号（可独立跑）
 lib-ui.sh             终端输出公共库（颜色、ok/warn/err、确认）

@@ -69,17 +69,36 @@ export function maskAk(ak) {
  * 额度按「地域」区分（内地 20 / 非内地 200），而同一账号下可能
  * 既有内地机器又有非内地机器。阿里云的规则是**两部分分开计算**：
  *     中国内地 20GB 一份 + 非中国内地 200GB 一份，互不占用。
- * 所以这里分别加总，而不是取一个值。
+ * 所以这里分别判断两个池子「有没有用到」，而不是逐台累加。
+ *
+ * 🔴 这里修过一个会算错 3 倍的真 BUG：
+ *     最初的写法是 `for (成员) overseas += 200`，
+ *     结果同一个账号下挂 3 台海外机器就得出「免费额度 600GB」——
+ *     而阿里云实际只给这个账号 200GB。用户照着 600GB 的报表看，
+ *     以为还剩一大截，实际早就超了，止损却还没触发。
+ *
+ *     根因是把「按台累加」和「按账号共享」搞混了。
+ *     免费额度是**账号级**的，台数再多也只有一份。
+ *     所以正确做法是：每个池子最多加一次。
  */
 export function quotaForGroup(members) {
   let mainland = 0.0;
   let overseas = 0.0;
+  let hasMainland = false;
+  let hasOverseas = false;
   for (const user of members || []) {
     const region = user?.region || '';
     if (isOverseasRegion(region)) {
-      overseas += getFreeQuotaGb(region);
+      // 非内地池：本账号只要有**任意一台**非内地机器，就占一份 200GB
+      if (!hasOverseas) {
+        overseas += getFreeQuotaGb(region);
+        hasOverseas = true;
+      }
     } else {
-      mainland += getFreeQuotaGb(region);
+      if (!hasMainland) {
+        mainland += getFreeQuotaGb(region);
+        hasMainland = true;
+      }
     }
   }
   return { mainland, overseas };

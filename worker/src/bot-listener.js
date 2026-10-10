@@ -77,7 +77,9 @@ export function deviceMenuRows(config) {
   const rows = [];
   for (const user of (config?.users || []).slice(0, 20)) {
     const name = String(user?.name || user?.instance_id || '').trim();
-    rows.push([L.buildDeviceButton(name, Boolean(user?.paused))]);
+    // 第三个参数把实例 ID 尾段带进按钮文字 —— 点按钮时就能精确锁定这一台，
+    // 不再靠「名字前缀匹配」（那会串台，详见 parseDeviceButton 的注释）
+    rows.push([L.buildDeviceButton(name, Boolean(user?.paused), user?.instance_id)]);
   }
   rows.push([L.LBL_BACK_MAIN]);
   return rows;
@@ -108,6 +110,12 @@ export function findUserById(config, instanceId) {
 /**
  * 按备注名查机器（按钮文字里存的是名字，不是实例 ID）。
  *
+ * ⚠️ 这个函数**只该用在「把用户输入的名字翻译成机器」**这一种场景
+ *   （例如菜单列表里点按钮）。
+ *
+ * 🔴 绝对不要用它来还原「三级菜单当前选中的是哪台机器」！
+ *    原因见下面 `resolveCurrentDevice` 的注释 —— 那是删错机器的根源。
+ *
  * 名字被截断过时（按钮上只显示前 12 字），退化为前缀匹配。
  */
 export function findUserByName(config, name) {
@@ -121,6 +129,44 @@ export function findUserByName(config, name) {
     if (full && (full.startsWith(target) || target.startsWith(full))) return user;
   }
   return null;
+}
+
+/**
+ * 还原「三级菜单里当前选中的是哪台机器」。
+ *
+ * 🔴 这里修的是一个**会删错机器**的高危 BUG，务必看清来龙去脉：
+ *
+ *   旧做法：二级菜单点某台机器时，把 `user.name` 存进会话；
+ *          三级菜单里再用 `findUserByName` 按名字查回来。
+ *
+ *   问题出在「名字会被截断」上：
+ *     · 菜单按钮上有长度上限（DEVICE_NAME_MAX = 22），超长会截断加「…」；
+ *     · 而 `findUserByName` 的第一轮精确匹配匹配不到截断名，
+ *       于是退化为第二轮「前缀模糊匹配」——**返回第一个前缀相符的机器**。
+ *
+ *   于是只要有两台机器的名字前 22 个字一样：
+ *     机器 A 名字：`我的生产环境服务器-新加坡节点-AAAA`
+ *     机器 B 名字：`我的生产环境服务器-新加坡节点-BBBB`
+ *   按钮上两台都显示成 `我的生产环境服务器-新加坡节点…`（一模一样），
+ *   点 B 进去，`findUserByName` 会返回 **A**（因为 A 在前面）。
+ *   结果：你想删 B、想关 B、想看 B 的状态，**实际全作用在 A 上**。
+ *   删机器是不可逆的 —— 用户会以为「我删的是那台不用的」，
+ *   结果把正在跑业务的那台从监控里摘掉了。
+ *
+ *   正确做法：会话里存**实例 ID**（阿里云保证唯一，且绝不被截断），
+ *   用 `findUserById` 精确查回来。
+ *
+ * 兼容性：老会话里存的是名字。检测到「按 id 查不到」时，
+ *        退回用名字查一次，保证升级后用户不用重新点一遍。
+ */
+export function resolveCurrentDevice(config, currentKey) {
+  const key = String(currentKey || '').trim();
+  if (!key) return null;
+  // 首选：当成实例 ID 精确查找（新逻辑）
+  const byId = findUserById(config, key);
+  if (byId) return byId;
+  // 兜底：老会话存的是名字（升级兼容）
+  return findUserByName(config, key);
 }
 
 // ---------------------------------------------------------------------------
@@ -456,13 +502,69 @@ export async function runInspection(env, config, token, chatId) {
       );
       return;
     }
-    await tg.sendText(
-      token, chatId,
-      `巡检完成\n\n${summary}\n\n详细过程见 Cloudflare 的实时日志。`
-    );
+    await tg.sendText(token, chatId, buildInspectionReply(summary));
   } catch (error) {
     await tg.sendText(token, chatId, `巡检执行失败：${common.sanitize(error)}`);
   }
+}
+
+/**
+ * 把 runInspection 的返回值翻译成给人看的一句话。
+ *
+ * 🔴 这里修过一个很丢脸的显示 BUG：
+ *     老代码写的是 `` `巡检完成\n\n${summary}\n\n...` ``，
+ *     而 summary 是个**对象** `{ ok, checked, skipped }`。
+ *     对象插进模板字符串会被转成 `[object Object]`，
+ *     于是用户收到的回执是：
+ *         「巡检完成  |  | [object Object]」
+ *     用户看到这行字完全不知道发生了什么 —— 到底查了几台？
+ *     成功了没有？一个字都读不出来。
+ *
+ * 教训：**模板字符串里永远不要直接插对象**。
+ *     哪怕当下看起来能跑，将来返回值一改结构就会变成这句话。
+ *     这里改成显式判断每一种返回形态，每种都有一个明确的中文说法。
+ *
+ * runInspection 的四种返回值（见 guard.js）：
+ *   { ok: true,  skipped: true, checked: 0 }   软锁拦住，本轮没跑
+ *   { ok: true,  checked: 0 }                  配置里没有机器
+ *   { ok: true,  checked: N }                  正常查了 N 台
+ *   { ok: false, error: '...' }                巡检过程出错
+ */
+export function buildInspectionReply(summary) {
+  const s = summary || {};
+  const parts = [];
+
+  // 🔴 失败必须先判 —— 否则会显示成「✅ 巡检完成」，
+  //    而实际上一条记录都没查。这种「假装成功」比报错更害人。
+  if (s.ok === false) {
+    parts.push('\u26A0\uFE0F 巡检没能完成');
+    parts.push('');
+    parts.push(`原因：${common.sanitize(s.error || '未知错误')}`);
+    parts.push('');
+    parts.push('常见原因：配置损坏、存储暂时不可用。');
+    parts.push('可稍后重试；若一直失败，请到 Cloudflare 仪表盘看实时日志。');
+    return parts.join('\n');
+  }
+
+  parts.push('\u2705 巡检完成');
+
+  if (s.checked === 0) {
+    // 没有机器可查 —— 这是新手最常见的情况（还没添加任何机器）
+    parts.push('');
+    parts.push('当前配置里没有正在监控的机器。');
+    parts.push('发送 /menu 打开菜单，选「\u2795 添加账号」把机器加进来。');
+  } else if (typeof s.checked === 'number' && s.checked > 0) {
+    parts.push('');
+    parts.push(`本次检查了 ${s.checked} 台机器。`);
+    parts.push('如有流量超标或机器异常，稍后会单独发提醒。');
+  } else {
+    parts.push('');
+    parts.push('本轮巡检已执行。');
+  }
+
+  parts.push('');
+  parts.push('详细过程见 Cloudflare 的实时日志（仪表盘 \u2192 Workers \u2192 日志）。');
+  return parts.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -568,16 +670,38 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
     await sendMainMenu(token, chatId);
     return;
   }
-  const deviceName = L.parseDeviceButton(raw);
-  if (deviceName) {
-    const user = findUserByName(config, deviceName);
+  const parsedBtn = L.parseDeviceButton(raw);
+  if (parsedBtn) {
+    // 优先用按钮里的实例 ID 尾段精确锁定机器；
+    // 老格式按钮（没有 ID）才退回按名字匹配。
+    // 这样「两台机器名字前 22 字相同」也不会再点错。
+    let user = null;
+    if (parsedBtn.idTail) {
+      user = (config?.users || []).find(
+        (u) => L.shortIdTail(u?.instance_id) === parsedBtn.idTail
+      ) || null;
+      if (user && parsedBtn.name) {
+        // 双保险：尾段撞车时（概率极低）再用名字确认一下；
+        // 名字对不上就说明尾段碰撞了，此时宁可不认，也不要认错。
+        const fullName = String(user?.name || '').trim();
+        if (fullName && parsedBtn.name && !fullName.startsWith(parsedBtn.name)) {
+          user = null;
+        }
+      }
+    }
+    if (!user && parsedBtn.name) {
+      user = findUserByName(config, parsedBtn.name);
+    }
     if (!user) {
       await tg.sendText(token, chatId, '没找到这台机器，可能在配置里被删掉了。');
       await sendDeviceList(token, chatId, config);
       return;
     }
-    // 记住选中的机器，三级菜单的按钮要靠它才知道作用于哪台
-    await common.setCurrentDevice(env, chatId, user.name || user.instance_id || '');
+    // 记住选中的机器，三级菜单的按钮要靠它才知道作用于哪台。
+    // ⚠️ 存的是 **instance_id**（唯一、不会被截断），不是 name ——
+    //    存名字会导致两台同名前缀的机器互相串台，甚至删错机器。
+    //    详见 resolveCurrentDevice 的注释。
+    await common.setCurrentDevice(env, chatId, user.instance_id || '');
     await sendDeviceActions(token, chatId, user);
     return;
   }
@@ -585,8 +709,9 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
   // ---- 三级菜单 ----
   // 三级菜单的按钮要作用在「某台机器」上，而按钮文字本身不带机器名，
   // 所以这里从会话状态里取「最近一次选中的机器」。
-  const currentName = await common.getCurrentDevice(env, chatId);
-  const current = findUserByName(config, currentName);
+  // 用 resolveCurrentDevice 的**实例 ID 精确匹配**，不用名字模糊匹配。
+  const currentKey = await common.getCurrentDevice(env, chatId);
+  const current = resolveCurrentDevice(config, currentKey);
   if (current) {
     if (L.matchMain(raw, L.LBL_BACK_LIST)) {
       await sendDeviceList(token, chatId, config);

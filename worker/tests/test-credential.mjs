@@ -116,7 +116,7 @@ function allText(calls) {
   return calls.sendMessage.map((m) => m.text || '').join('\n');
 }
 
-const CHAT = '7912011729';
+const CHAT = '123456789';
 const TOKEN = 'fake-token:ABC';
 
 // ⚠️ 测试里一律用「一眼就是假的」占位密钥，绝不写真实凭据。

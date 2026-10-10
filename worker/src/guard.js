@@ -437,6 +437,72 @@ async function handleCheckFailure(state, config, name, key, error, logger) {
 }
 
 /**
+ * 解析单台机器的「关机阈值」（GB）。
+ *
+ * 🔴 这是一个会造成**真金白银损失**的函数，务必读清楚为什么这么啰嗦：
+ *
+ *     最初的写法是一行：
+ *         const limitGb = Number(user.traffic_limit === undefined ? 180 : user.traffic_limit);
+ *
+ *     它的问题：`=== undefined` 只挡住了「字段完全不存在」这一种情况。
+ *     而实际上可能出现的坏值有：
+ *         null      → Number(null)      = 0
+ *         ''        → Number('')        = 0
+ *         '   '     → Number('   ')     = 0
+ *         'abc'     → Number('abc')     = NaN
+ *         -5        → Number(-5)        = -5
+ *         true      → Number(true)      = 1
+ *     一旦算出来是 0 或负数，下游判断 `trafficGb < limitGb` 就变成
+ *     「流量 < 0」→ 永假 → **直接跳进强制关机分支**，
+ *     而且每 5 分钟一轮、轮轮都关，用户完全不知道为什么机器老是被关。
+ *     算出来是 NaN 更糟：NaN 参与的任何比较都是 false，
+ *     同样会掉进 else（关机）分支。
+ *
+ *     所以这里的策略是：**只要拿不准，就退回默认 180，绝不冒险关机。**
+ *     宁可漏关一次（用户亏点流量钱），也不能乱关（用户业务直接挂）。
+ *
+ * @returns {{ limitGb: number, invalid: string|null }}
+ *          invalid 非空表示入参非法、已回退默认值，原因写在这里供日志用。
+ */
+export function parseTrafficLimit(raw) {
+  const DEFAULT_GB = 180;
+
+  // 字段完全缺失（老版本配置里没有这个字段）→ 用默认值，不算异常
+  if (raw === undefined) {
+    return { limitGb: DEFAULT_GB, invalid: null };
+  }
+
+  // 布尔值不是合法阈值 —— 注意 Number(true)===1 这种坑
+  if (typeof raw === 'boolean') {
+    return { limitGb: DEFAULT_GB, invalid: `布尔值 ${raw}（不是数字）` };
+  }
+
+  // 字符串先去掉空白，再判断空串
+  let value = raw;
+  if (typeof raw === 'string') {
+    value = raw.trim();
+    if (value === '') {
+      return { limitGb: DEFAULT_GB, invalid: '空字符串' };
+    }
+  }
+
+  // null 单独挡 —— Number(null) 是 0，不是 NaN，最危险
+  if (value === null) {
+    return { limitGb: DEFAULT_GB, invalid: 'null' };
+  }
+
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return { limitGb: DEFAULT_GB, invalid: `无法转成数字（原值 ${JSON.stringify(raw)}）` };
+  }
+  if (num <= 0) {
+    return { limitGb: DEFAULT_GB, invalid: `不是正数（${num}）` };
+  }
+
+  return { limitGb: num, invalid: null };
+}
+
+/**
  * 巡检单个实例。
  *
  * @param {Array} [collector] 可选的台账收集器。传了就把本机的流量快照 push 进去，
@@ -454,7 +520,15 @@ async function checkOne(env, user, config, state, logger, collector) {
   }
 
   const { ak, sk, region } = user;
-  const limitGb = Number(user.traffic_limit === undefined ? 180 : user.traffic_limit);
+
+  // 阈值解析：非法值一律回退 180，并明确记一条日志。
+  // 这条日志很重要 —— 否则用户只会看到「机器莫名其妙被关了」，
+  // 完全想不到是阈值字段写坏了。
+  const parsed = parseTrafficLimit(user.traffic_limit);
+  const limitGb = parsed.limitGb;
+  if (parsed.invalid) {
+    logger(`[${name}] ⚠️ 关机阈值不合法（${parsed.invalid}），已按默认 ${limitGb}GB 处理，本轮不会因此关机`);
+  }
 
   // 安全护栏：若关机阈值高于本月免费额度，则超出的部分会真实产生费用。
   // 这种情况必须提醒 —— 否则可能误以为「还没到阈值 = 不花钱」。

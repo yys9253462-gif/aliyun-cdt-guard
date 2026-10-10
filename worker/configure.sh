@@ -246,7 +246,7 @@ check_chat_id() {
     return 0
   fi
   err "这不像一个 Telegram 数字 ID：「${v}」"
-  printf "   它应该是一串纯数字，例如 ${CYAN}7912011729${RESET}。\n"
+  printf "   它应该是一串纯数字，通常是 9~10 位，例如 ${CYAN}123456789${RESET}。\n"
   return 1
 }
 
@@ -256,7 +256,22 @@ check_chat_id() {
 ask_validated() {
   local prompt="$1" checker="$2" answer=""
   while true; do
-    read -r -p "$prompt" answer
+    # 🔴 read 失败必须立刻退出，否则会**无限刷屏**：
+    #    当输入被重定向（脚本化调用、`< /dev/null`、管道提前关闭）时，
+    #    read 会立刻返回失败、answer 恒为空，于是这个 while 循环
+    #    一秒能转几千圈，「不能为空」刷满整个终端，用户只能强杀进程。
+    #    这里把「读不到」和「读到空」区分开：读不到就退出，不重试。
+    if ! read -r -p "$prompt" answer; then
+      err "读取输入失败（输入流已结束）。已中断本次配置，未写入任何内容。"
+      return 1
+    fi
+
+    # 自动去掉首尾空格 —— 用户从阿里云控制台复制实例 ID / AK 时
+    # 极容易带上一个前导或尾随空格，肉眼完全看不出来。
+    # 老版本会直接判「格式不对」，用户反复粘贴同一个值、反复被拒，
+    # 完全不知道问题出在那个看不见的空格上。这里先 trim 再校验。
+    answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
     if [ -z "$answer" ]; then
       warn "不能为空 —— 直接回车不会用默认值，请认真填一个。"
       printf "   （想放弃这一台，输入 ${CYAN}q${RESET} 再回车）\n"
@@ -333,8 +348,34 @@ ask_one_machine() {
   esac
 
   # 追加到临时文件（每行一个 JSON 对象）
-  printf '{"name":"%s","instance_id":"%s","region":"%s","ak":"%s","sk":"%s","traffic_limit":%s,"paused":false}\n' \
-    "$name" "$instance_id" "$region" "$ak" "$sk" "$limit" >> "$TEMP_JSON"
+  #
+  # 🔴 这里**必须用 node 生成 JSON**，不能用 printf 手工拼字符串。
+  #    原因（实测复现过）：机器名里只要有 `"` 或 `\`，
+  #    手工拼出来的就是坏 JSON —— 例如名字填 `我的"机器`：
+  #        {"name":"我的"机器", ...}     ← 引号把字符串提前闭合了
+  #    后果是**整个配置写不进去**，而报错信息是 JSON 解析失败，
+  #    普通用户根本联系不到「名字里有个引号」这件事上。
+  #    JSON.stringify 会把引号、反斜杠、换行都正确转义，
+  #    从根上杜绝这一类问题。
+  local json_line
+  json_line="$(NAME="$name" INSTANCE_ID="$instance_id" REGION="$region" \
+      AK="$ak" SK="$sk" LIMIT="$limit" node -e '
+    const payload = {
+      name: process.env.NAME,
+      instance_id: process.env.INSTANCE_ID,
+      region: process.env.REGION,
+      ak: process.env.AK,
+      sk: process.env.SK,
+      traffic_limit: Number(process.env.LIMIT),
+      paused: false,
+    };
+    process.stdout.write(JSON.stringify(payload));
+  ')"
+  if [ -z "$json_line" ]; then
+    err "生成配置失败（node 没能执行）。请确认 Node.js 已正确安装。"
+    return 1
+  fi
+  printf '%s\n' "$json_line" >> "$TEMP_JSON"
   ok "第 $index 台已记录：$name"
   return 0
 }
@@ -513,7 +554,9 @@ run_configure() {
   printf "\n"
   # 明确给一个反悔点，而不是一进来就让人填 ——
   # 这是破坏性操作，必须先让人知道后果、再由他决定要不要开始。
-  if ! confirm "确实要用新填的清单覆盖现有配置吗？"; then
+  # ⚠️ 用 confirm_danger（默认「否」）：手滑回车只会安全取消，
+  #    不会把现有配置覆盖掉。
+  if ! confirm_danger "确实要用新填的清单覆盖现有配置吗？（要覆盖请输入 y）"; then
     info "已取消，没有修改任何配置。"
     return 1
   fi
@@ -792,7 +835,7 @@ run_add_account() {
     | sed -E 's/"sk":"[^"]*"/"sk":"[已隐藏]"/g; s/"ak":"([^"]{6})[^"]{6,}(")/"ak":"\1****\2/g; s/"ak":"([^"]{6})[^"]*"/"ak":"\1****"/g'
   printf "\n"
 
-  if ! confirm "确认写入？"; then
+  if ! confirm_danger "确认写入？（要写入请输入 y）"; then
     info "已取消，未做任何修改。"
     rm -f "$TEMP_JSON"
     return 1

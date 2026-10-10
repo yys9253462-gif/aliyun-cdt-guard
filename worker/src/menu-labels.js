@@ -79,41 +79,94 @@ export const DEVICE_NAME_MAX = 22;
 export const PAUSED_MARK = '\u{23F8}\u{FE0F}';            // ⏸️
 
 /**
+ * 实例 ID 在按钮里保留多少个尾字符。
+ *
+ * 🔴 为什么要在按钮文字里塞一段实例 ID（这是修一个「删错机器」的 BUG）：
+ *
+ *   按钮文字原来**只有名字**。而名字会被截断到 22 字，于是：
+ *     机器 A：`香港-生产环境-新加坡中转节点-AAAA`
+ *     机器 B：`香港-生产环境-新加坡中转节点-BBBB`
+ *   两台截断后都显示成 `香港-生产环境-新加坡中转节点-A…` 之类，
+ *   看上去几乎一样。用户点 B，程序却用「前缀匹配」找回了 A，
+ *   于是「删 B」实际删掉的是 A —— 不可逆的错误。
+ *
+ *   实例 ID（`i-xxxxxxxxxxxxxxxx`）由阿里云分配、**保证唯一且绝不被截断**，
+ *   是唯一可靠的定位依据。但整个 ID 太长（18+ 字符）放不下，
+ *   所以只取**尾部 8 个字符** —— 它既足够区分（8 位 hex 的碰撞概率极低），
+ *   又刚好是用户看得懂、能对上号的「机器尾号」。
+ *
+ *   这样按钮文字 = `🖥 名字… [尾号]`，点按钮即可直接精确定位到唯一实例。
+ */
+export const DEVICE_ID_TAIL = 8;
+
+/**
+ * 取实例 ID 的尾段（用于按钮显示与精确定位）。
+ *
+ * `i-5ts7fo7n0ui3stsujw0r` → `3stsujw0r`（取最后 8 位）
+ */
+export function shortIdTail(instanceId) {
+  const id = String(instanceId || '').trim();
+  if (!id) return '';
+  return id.length <= DEVICE_ID_TAIL ? id : id.slice(-DEVICE_ID_TAIL);
+}
+
+/**
  * 生成实例列表里的一个按钮文字。
  *
- * 形如「🖥 菲律宾节点」；已暂停的会在后面加个 ⏸️ 标记。
+ * 形如「🖥 菲律宾节点 [3stsujw0r]」；已暂停的会在后面加个 ⏸️ 标记。
+ *
+ * 尾部的 `[xxxxxxxx]` 是实例 ID 的尾段（见 DEVICE_ID_TAIL 的长注释）——
+ * 它既是给用户看的「机器尾号」，也是程序精确定位的依据。
+ * 名字重名 / 被截断都不再导致找错机器。
  */
-export function buildDeviceButton(name, paused = false) {
+export function buildDeviceButton(name, paused = false, instanceId = '') {
   let shortName = String(name || '未命名');
   if (shortName.length > DEVICE_NAME_MAX) {
     shortName = `${shortName.slice(0, DEVICE_NAME_MAX)}…`;
   }
   const mark = paused ? ` ${PAUSED_MARK}` : '';
-  return `${DEVICE_PREFIX}${shortName}${mark}`;
+  const tail = shortIdTail(instanceId);
+  const idPart = tail ? ` [${tail}]` : '';
+  return `${DEVICE_PREFIX}${shortName}${mark}${idPart}`;
 }
 
 /**
- * 从按钮文字反查实例名。
+ * 从按钮文字反查「实例名 + 实例 ID 尾段」。
  *
  * 不是实例按钮（没有 🖥 前缀）则返回 null。
- * 注意：返回的是**按钮上显示的短名**，可能被截断过，
- * 所以调用方要用「前缀匹配」去配置里找真实实例。
+ *
+ * 返回 { name, idTail }：
+ *   name    按钮上显示的短名（可能被截断，仅用于显示与兜底匹配）
+ *   idTail  实例 ID 尾段；为空表示这是个老格式按钮（没有 ID 信息）
+ *
+ * ⚠️ 调用方**应当优先用 idTail 精确匹配**，只有拿不到 idTail 时才退回
+ *    按名字前缀匹配。原因见 DEVICE_ID_TAIL 的注释（否则会删错机器）。
  */
 export function parseDeviceButton(text) {
   const raw = String(text || '');
   if (!raw.startsWith(DEVICE_PREFIX)) {
     return null;
   }
-  let name = raw.slice(DEVICE_PREFIX.length).trim();
+  let rest = raw.slice(DEVICE_PREFIX.length).trim();
+
+  // 先把尾部的「 [xxxxxxxx]」摘出来
+  let idTail = '';
+  const m = rest.match(/\s*\[([0-9a-zA-Z-]{1,64})\]\s*$/);
+  if (m) {
+    idTail = m[1];
+    rest = rest.slice(0, m.index).trim();
+  }
+
   // 去掉尾部的暂停标记
-  if (name.endsWith(PAUSED_MARK)) {
-    name = name.slice(0, -PAUSED_MARK.length).trim();
+  if (rest.endsWith(PAUSED_MARK)) {
+    rest = rest.slice(0, -PAUSED_MARK.length).trim();
   }
-  // 去掉截断省略号（这个名字用于前缀匹配，不是用于精确相等）
-  if (name.endsWith('…')) {
-    name = name.slice(0, -1);
+  // 去掉截断省略号
+  if (rest.endsWith('…')) {
+    rest = rest.slice(0, -1);
   }
-  return name || null;
+  if (!rest && !idTail) return null;
+  return { name: rest, idTail };
 }
 
 /**

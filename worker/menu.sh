@@ -87,8 +87,23 @@ config_stats() {
     return 0
   fi
   # ⚠️ 不要写死 node 路径 —— 换台机器就找不到。动态取。
+  #
+  # 🔴 这里**必须**用 preflight_node / local_node_bindir，不能直接 `command -v node`：
+  #    本项目的 preflight 会自动把 Node 装到自己的目录（~/.cdt-guard/node 之类），
+  #    那个目录**不在 PATH 里**。所以新手刚装完、还没重开终端时，
+  #    `command -v node` 找不到，统计就会显示「0 台机器 0 个账号」——
+  #    用户明明配好了机器，菜单却说他什么都没配，非常吓人。
+  #    preflight_node 会先把本地目录加进 PATH，就认得出来了。
+  if declare -F preflight_node >/dev/null 2>&1; then
+    preflight_node >/dev/null 2>&1 || true
+  fi
   local node_bin=""
   node_bin="$(command -v node 2>/dev/null || true)"
+  if [ -z "$node_bin" ] && declare -F local_node_bindir >/dev/null 2>&1; then
+    local _lb=""
+    _lb="$(local_node_bindir 2>/dev/null || true)"
+    [ -n "$_lb" ] && [ -x "$_lb/node" ] && node_bin="$_lb/node"
+  fi
   if [ -z "$node_bin" ]; then
     printf '0 0'
     return 0

@@ -64,6 +64,9 @@ pause() {
 }
 
 # 是/否确认，默认「是」（直接回车 = 是）
+#
+# ⚠️ 只用于**无害**的确认（例如「现在开始安装吗？」）。
+#    破坏性操作（覆盖配置、删除东西）请改用 confirm_danger。
 confirm() {
   local prompt="$1" answer=""
   printf "%s (Y/n) " "$prompt"
@@ -71,5 +74,23 @@ confirm() {
   case "$answer" in
     [Nn]*) return 1 ;;
     *)     return 0 ;;
+  esac
+}
+
+# 是/否确认，默认「否」（直接回车 = 否）
+#
+# 🔴 为什么必须有这个函数（踩过的坑）：
+#    configure.sh 里有一句 `confirm "确实要用新填的清单覆盖现有配置吗？"` ——
+#    用的是默认「是」的版本。用户敲了半天配置，最后一步习惯性连按回车，
+#    结果**直接就把原有配置覆盖了**，且没有任何挽回余地。
+#    破坏性操作的默认值必须是「否」：想执行得明确敲 y。
+#    这样「手滑回车」只会安全地取消，而不是把东西弄坏。
+confirm_danger() {
+  local prompt="$1" answer=""
+  printf "%s (y/N) " "$prompt"
+  read -r answer || true
+  case "$answer" in
+    [Yy]*) return 0 ;;
+    *)     return 1 ;;
   esac
 }

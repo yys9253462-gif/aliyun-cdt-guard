@@ -182,10 +182,19 @@ const rows = [
 check('主菜单共 13 个按钮', rows.flat().length === 13);
 
 // 从 menu-labels 构造实例按钮，验证往返
+// ⚠️ parseDeviceButton 现在返回 { name, idTail } 而不是纯字符串 ——
+//    因为按钮里要带实例 ID 尾段，才能避免「同名前缀的两台机器点错」。
 const btn = L.buildDeviceButton('菲律宾节点', false);
-check('实例按钮可反查', L.parseDeviceButton(btn) === '菲律宾节点');
+check('实例按钮可反查', L.parseDeviceButton(btn)?.name === '菲律宾节点',
+  JSON.stringify(L.parseDeviceButton(btn)));
 const btnPaused = L.buildDeviceButton('新加坡备用节点', true);
-check('暂停实例按钮可反查', L.parseDeviceButton(btnPaused) === '新加坡备用节点');
+check('暂停实例按钮可反查', L.parseDeviceButton(btnPaused)?.name === '新加坡备用节点',
+  JSON.stringify(L.parseDeviceButton(btnPaused)));
+
+// 带实例 ID 的按钮必须能取出尾号（这是「不删错机器」的关键信息）
+const btnWithId = L.buildDeviceButton('某台机器', false, 'i-5ts7fo7n0ui3stsujw0r');
+check('带实例ID的按钮可取出尾号', L.parseDeviceButton(btnWithId)?.idTail === 'stsujw0r',
+  JSON.stringify(L.parseDeviceButton(btnWithId)));
 
 // 三级菜单按钮文字不得含英文字母
 const devRows = [

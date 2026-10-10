@@ -87,25 +87,42 @@ for (const [name, paused, expect] of cases) {
   check(`按钮不以字母开头`, !/^[A-Za-z]/.test(btn));
 }
 
-// 往返
+// 往返（不传实例 ID：按钮里没有尾号，反查只拿到名字）
 const btn1 = M.buildDeviceButton('菲律宾节点', false);
 const back1 = M.parseDeviceButton(btn1);
 console.log(`  带图标反查: ${JSON.stringify(back1)}`);
-check('反查得到「菲律宾节点」', back1 === '菲律宾节点');
+check('反查得到「菲律宾节点」', back1 && back1.name === '菲律宾节点', JSON.stringify(back1));
+check('没有实例 ID 时 idTail 为空', back1 && back1.idTail === '', JSON.stringify(back1));
 
 const btn2 = M.buildDeviceButton('新加坡节点', true);
 const back2 = M.parseDeviceButton(btn2);
 console.log(`  暂停态反查: ${JSON.stringify(back2)}`);
-check('暂停态反查得到「新加坡节点」', back2 === '新加坡节点');
+check('暂停态反查得到「新加坡节点」', back2 && back2.name === '新加坡节点', JSON.stringify(back2));
 
 const btn3 = M.buildDeviceButton('美东备用服务器边节点', false);
 const back3 = M.parseDeviceButton(btn3);
 console.log(`  超长名按钮: ${JSON.stringify(btn3)} \u2192 反查 ${JSON.stringify(back3)}`);
-check('超长名反查是原名的前缀', '美东备用服务器边节点'.startsWith(back3), `反查「${back3}」`);
+check('超长名反查是原名的前缀', back3 && '美东备用服务器边节点'.startsWith(back3.name), JSON.stringify(back3));
+
+// ---- 带实例 ID 尾段：这是「不删错机器」的关键 ----
+const btnId = M.buildDeviceButton('香港-生产环境-新加坡中转节点-AAAA', false, 'i-5ts7fo7n0ui3stsujw0r');
+console.log(`  带实例ID按钮: ${JSON.stringify(btnId)}`);
+const backId = M.parseDeviceButton(btnId);
+check('按钮里带上了实例 ID 尾段', backId && backId.idTail === 'stsujw0r', JSON.stringify(backId));
+check('按钮文字里肉眼可见尾号', btnId.includes('[stsujw0r]'), btnId);
+
+// 两个「名字前缀完全相同」的机器，按钮必须能区分开
+const nA = '香港-生产环境-新加坡中转节点-AAAA';
+const nB = '香港-生产环境-新加坡中转节点-BBBB';
+const btnA = M.buildDeviceButton(nA, false, 'i-1111111111aaaaaaaa');
+const btnB = M.buildDeviceButton(nB, false, 'i-2222222222bbbbbbbb');
+check('同名前缀的两台机器按钮文字不同', btnA !== btnB, `${btnA} vs ${btnB}`);
+const ridA = M.parseDeviceButton(btnA);
+const ridB = M.parseDeviceButton(btnB);
+check('两台机器的 ID 尾段不同', ridA.idTail !== ridB.idTail, `${ridA.idTail} vs ${ridB.idTail}`);
 
 console.log(`  非实例按钮反查: ${JSON.stringify(M.parseDeviceButton('\u{1F4CA} 总览'))}`);
 check('非实例按钮反查为 null', M.parseDeviceButton('\u{1F4CA} 总览') === null);
-
 // ---------------------------------------------------------------------------
 console.log('--- 4. matchMain 两种输入都认 ---');
 for (const l of mainLabels) {

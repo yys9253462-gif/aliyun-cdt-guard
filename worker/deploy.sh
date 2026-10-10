@@ -232,7 +232,32 @@ do_set_secrets() {
   printf "   找 @BotFather 要。它长得像：1234567890:AAxxxxxxxxxxxxxxxxxxxxxxx\n"
   printf "   如果你还没有机器人：在 Telegram 里找 @BotFather，发 /newbot，\n"
   printf "   按提示起个名字，它就会给你这串令牌。\n"
-  read -r -p "   粘贴机器人令牌（直接回车可跳过）： " bot_token
+  local bot_token=""
+  while true; do
+    read -r -p "   粘贴机器人令牌（直接回车可跳过）： " bot_token || true
+    [ -z "$bot_token" ] && break
+    # 去掉首尾空格 —— 从聊天窗口复制令牌时极易带上空格或换行
+    bot_token="$(printf '%s' "$bot_token" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -z "$bot_token" ] && break
+
+    # 🔴 格式校验：Telegram 机器人令牌的固定形态是「纯数字 : 一串字符」。
+    #    老版本不校验，填错了也照样显示「已写入」——
+    #    用户以为配好了，实际机器人一条消息都收不到，
+    #    而且那个阶段很难判断到底是令牌错、还是网络错、还是代码错。
+    #    这里在写之前就拦下来，并明确说清「哪里不对」。
+    if printf '%s' "$bot_token" | grep -qE '^[0-9]{6,}:[A-Za-z0-9_-]{20,}$'; then
+      break
+    fi
+    err "这不像一个机器人令牌：「${bot_token}」"
+    printf "   正确形态是 ${CYAN}数字:一串字符${RESET}，例如：\n"
+    printf "   ${CYAN}1234567890:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx${RESET}\n"
+    printf "   常见错误：\n"
+    printf "     · 只复制了冒号前面的数字部分（少了 : 和后半段）\n"
+    printf "     · 复制时多了空格或换行（已自动帮你去掉首尾空格）\n"
+    printf "     · 把「机器人用户名」当成令牌了（用户名不带冒号）\n"
+    printf "   重试一次，或直接回车跳过（稍后可补）。\n"
+  done
+
   if [ -n "$bot_token" ]; then
     if printf "%s" "$bot_token" | wrun secret put TELEGRAM_BOT_TOKEN >/dev/null 2>&1; then
       ok "机器人令牌已写入。"

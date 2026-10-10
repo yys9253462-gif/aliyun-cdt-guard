@@ -96,6 +96,34 @@ Check "缺失分支提示装完重新双击" $hasReopen
 $hardCoded = ($text -match 'C:\\\\Program Files\\\\Git\\\\bin\\\\bash\.exe"')
 Check "没有写死绝对路径（都是动态探测）" (-not $hardCoded)
 
+# ---- 8. 双击垫片 启动.bat（Windows 双击 .ps1 只会用记事本打开） ----
+# 小白用户会直接双击包里的启动器。.ps1 双击是「打开编辑器」而不是「运行」，
+# 所以必须有一个 .bat 垫片。这里钉死它的三个关键性质。
+$batPath = Join-Path $scriptDir '启动.bat'
+Check "启动.bat 存在" (Test-Path $batPath) $batPath
+
+if (Test-Path $batPath) {
+    $batBytes = [System.IO.File]::ReadAllBytes($batPath)
+
+    # 8a. 必须是 CRLF 换行 —— LF 会让 cmd.exe 把 rem 注释当命令执行
+    $batText = [System.Text.Encoding]::ASCII.GetString($batBytes)
+    $lfOnly = ([regex]::Matches($batText, "(?<!\r)\n")).Count
+    Check "启动.bat 是 CRLF 换行（LF 会导致满屏报错）" ($lfOnly -eq 0) "裸 LF 数量：$lfOnly"
+
+    # 8b. 必须是纯 ASCII —— cmd.exe 按 GBK 解码，非 ASCII 会乱码
+    $nonAscii = 0
+    foreach ($b in $batBytes) { if ($b -gt 127) { $nonAscii++ } }
+    Check "启动.bat 是纯 ASCII（中文会乱码并被当命令执行）" ($nonAscii -eq 0) "非 ASCII 字节：$nonAscii"
+
+    # 8c. 必须能调用 PowerShell，并且把退出码带出来
+    Check "启动.bat 会调用 PowerShell" ($batText -match 'powershell\.exe') 
+    Check "启动.bat 带 -ExecutionPolicy Bypass" ($batText -match 'ExecutionPolicy Bypass')
+    Check "启动.bat 会回传退出码" ($batText -match 'ERRORLEVEL')
+
+    # 8d. 不能写死中文文件名（.bat 里写中文路径会因 GBK 解码而匹配不到）
+    Check "启动.bat 用通配符定位 .ps1（不写死中文名）" ($batText -match '\*\.ps1')
+}
+
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ("  通过 $pass 项，失败 $fail 项") -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host ""

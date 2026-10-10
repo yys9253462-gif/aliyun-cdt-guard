@@ -311,6 +311,142 @@ for cmd in 'bash menu.sh' 'bash configure.sh' 'wrangler tail'; do
 done
 
 # ---------------------------------------------------------------------------
+group "13. 破坏性操作的默认值必须是「否」（手滑回车不能弄坏数据）"
+# ---------------------------------------------------------------------------
+# 教训：configure.sh 里「覆盖现有配置」原来用的是默认「是」的 confirm，
+#      用户敲完配置习惯性连按回车，直接把旧配置覆盖了。
+#      这里钉死两件事：confirm_danger 存在，且破坏性操作必须用它。
+if grep -qE '^confirm_danger\(\)' lib-ui.sh; then
+  pass "lib-ui.sh 定义了 confirm_danger（默认否）"
+else
+  fail "缺少 confirm_danger 定义"
+fi
+
+# 破坏性操作的两个调用点都不得再用默认「是」的 confirm
+if grep -qF 'confirm_danger "确实要用新填的清单覆盖现有配置吗' configure.sh; then
+  pass "「覆盖配置」用 confirm_danger（默认否）"
+else
+  fail "「覆盖配置」仍用默认「是」的 confirm —— 手滑回车会覆盖配置"
+fi
+
+if grep -qF 'confirm_danger "确认写入' configure.sh; then
+  pass "「确认写入」用 confirm_danger（默认否）"
+else
+  fail "「确认写入」仍用默认「是」的 confirm"
+fi
+
+# 无害操作应保留 confirm（默认是），否则会让日常流程变啰嗦
+if grep -qF 'confirm "现在开始安装吗' menu.sh; then
+  pass "无害操作（开始安装）仍用默认「是」的 confirm"
+else
+  fail "无害操作被误改成默认「否」，会影响正常流程"
+fi
+
+# ---------------------------------------------------------------------------
+group "14. Windows 双击垫片 启动.bat 的硬性要求"
+# ---------------------------------------------------------------------------
+if [ -f "启动.bat" ]; then
+  pass "启动.bat 存在"
+
+  # 必须 CRLF —— LF 会让 cmd.exe 把 rem 注释当命令执行（实测满屏报错）
+  if grep -qU $'\r' 启动.bat 2>/dev/null; then
+    pass "启动.bat 含 CRLF 换行"
+  else
+    fail "启动.bat 是 LF 换行 —— 双击会满屏「不是内部或外部命令」"
+  fi
+
+  # 必须纯 ASCII —— cmd.exe 按 GBK 解码，非 ASCII 会乱码并被当命令执行
+  if LC_ALL=C grep -qP '[\x80-\xFF]' 启动.bat 2>/dev/null; then
+    fail "启动.bat 含非 ASCII 字节 —— 会乱码"
+  else
+    pass "启动.bat 是纯 ASCII"
+  fi
+
+  # 不能写死中文文件名（.bat 里写中文路径会因 GBK 解码而匹配不到）
+  if grep -qF '*.ps1' 启动.bat; then
+    pass "启动.bat 用通配符定位 .ps1"
+  else
+    fail "启动.bat 没有用通配符定位 .ps1"
+  fi
+
+  if grep -qF 'ExecutionPolicy Bypass' 启动.bat; then
+    pass "启动.bat 带 -ExecutionPolicy Bypass"
+  else
+    fail "启动.bat 缺少 -ExecutionPolicy Bypass"
+  fi
+else
+  fail "缺少 启动.bat（Windows 双击 .ps1 只会打开记事本）"
+fi
+
+# 打包清单里必须有它，否则交付包里没有。
+#
+# ⚠️ tools/ 目录**只在开发仓里**，交付包中不带（打包脚本是给作者用的，
+#    没必要发给用户）。所以在交付包里跑自检时这两项必须跳过，
+#    否则用户一跑自检就看到「失败」，会以为包有问题。
+if [ -f "tools/pack_release.py" ]; then
+  if grep -qF '"启动.bat"' tools/pack_release.py; then
+    pass "打包清单已包含 启动.bat"
+  else
+    fail "打包清单缺 启动.bat —— 用户拿不到双击入口"
+  fi
+
+  # 打包器必须保护 .bat 的 CRLF，不能被脱敏流程压成 LF
+  if grep -qF 'CRLF_EXT' tools/pack_release.py; then
+    pass "打包器对 .bat/.cmd 做了换行保护"
+  else
+    fail "打包器会在脱敏时把 .bat 的 CRLF 压成 LF"
+  fi
+else
+  printf '  \033[33m[跳过]\033[0m 打包清单检查（交付包里不含 tools/ 目录）\n'
+fi
+
+# ---------------------------------------------------------------------------
+group "15. 脚本健壮性：重复定义 / node 探测 / 输入空格 / 令牌校验"
+# ---------------------------------------------------------------------------
+# D6：同一个函数只能定义一次（重复定义会让「改一处、忘另一处」静默失效）
+dup_node="$(grep -c '^preflight_node()' lib-preflight.sh || true)"
+if [ "$dup_node" -eq 1 ]; then
+  pass "preflight_node 只定义 1 次（无重复定义）"
+else
+  fail "preflight_node 定义了 ${dup_node} 次 —— 存在重复定义"
+fi
+
+# D7：menu.sh 统计机器数时不能用裸 command -v node（认不出本地自动装的 Node）
+if grep -qF 'preflight_node' menu.sh; then
+  pass "menu.sh 会用 preflight_node 探测本地 Node"
+else
+  fail "menu.sh 只用 command -v node —— 新手刚装完会显示「0 台机器」"
+fi
+
+# A3：输入必须先去首尾空格（从控制台复制常带看不见的空格）
+if grep -qF 's/^[[:space:]]*//' configure.sh; then
+  pass "configure.sh 会去掉输入的首尾空格"
+else
+  fail "configure.sh 不去空格 —— 粘贴的实例 ID 会被误判格式错误"
+fi
+
+# D10：读不到输入必须退出，不能无限刷屏
+if grep -qF 'if ! read -r -p' configure.sh; then
+  pass "configure.sh 检测到输入流结束会退出（不会无限刷屏）"
+else
+  fail "configure.sh 的 read 没检测失败 —— EOF 时会无限刷屏"
+fi
+
+# D9：机器人令牌要校验格式，不能填错也报「已写入」
+if grep -qF 'A-Za-z0-9_-]{20,}' deploy.sh; then
+  pass "deploy.sh 校验机器人令牌格式"
+else
+  fail "deploy.sh 不校验令牌格式 —— 填错也会显示「已写入」"
+fi
+
+# A4：写配置必须用 node 生成 JSON，不能手工拼字符串
+if grep -qF 'JSON.stringify' configure.sh; then
+  pass "configure.sh 用 node + JSON.stringify 生成配置行"
+else
+  fail "configure.sh 手工拼 JSON —— 名字含引号会写坏配置"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n==========================================\n'
 printf '脚本自检结果: 通过 %d / 失败 %d\n' "$PASS" "$FAIL"
 printf '==========================================\n'

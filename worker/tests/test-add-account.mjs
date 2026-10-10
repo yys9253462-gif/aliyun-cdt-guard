@@ -53,7 +53,7 @@ class FakeKV {
   async list() { return { keys: [...this.store.keys()].map((name) => ({ name })) }; }
 }
 
-const CHAT = '7912011729';
+const CHAT = '123456789';
 
 function freshEnv() {
   return { CDT_GUARD_KV: new FakeKV() };
