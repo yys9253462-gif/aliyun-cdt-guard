@@ -117,7 +117,14 @@ bash menu.sh status        # 只看当前状态
 
 - **全自动**：不用去控制台手抄实例 ID、不用填地域，扫到什么全给你配上
 - **只新增，不动现有**：已监控的机器不会被覆盖；新机器默认阈值 180 GB、默认开启监控
-- **无名机器自动命名**：阿里云没给实例起名时，自动用「地域-实例尾号」代替
+- **无名机器自动命名**：阿里云没给实例起名时，自动用「**中文地域-账号标识-机器尾号**」
+  代替，例如 `马尼拉-LTAI5t-sujw0r`。
+  - 中文地域 —— 一眼知道在哪个机房（不用再记 `ap-southeast-6` 是什么）
+  - 账号标识 —— 打码 AccessKey 的前 6 位，和「🏦 账号汇总」页显示的**同一套规则**，
+    多账号时能看出这台机器属于哪个账号
+  - 机器尾号 —— 同地域同账号有多台时靠它区分
+- **换密钥不会改名**：同一台机器换 AccessKey 后是**原地更新凭据**，
+  你自己改过的名字与阈值都不会被冲掉
 - **随时可退**：扫描结果页有「🔄 重新扫描」（不重发密钥）和「❌ 取消添加」，也可发 `/cancel`
 - **15 分钟超时**：中途放下不弄了，会话自动作废，不会一直挂着等你
 
@@ -287,6 +294,7 @@ src/
   credential-error.js 凭据错误识别 + 中文翻译（唯一事实来源，零依赖）
   credential-check.js 凭据主动体检（逐账号验密钥、生成点名报告）
   account-scan.js     账号扫描：校验凭据 + 分批并发扫全地域机器
+  region-names.js     地域代码 → 中文名映射（唯一事实来源，附官方文档出处）
   add-account.js      机器人内「添加账号」流程（三步向导 + 会话状态机）
   common.js           公共层：时间、格式化、KV 存取、密钥遮蔽、向导会话
   telegram.js         Telegram 收发（含收密钥后立即删消息）
@@ -297,12 +305,12 @@ src/
   views.js            各页面文本构建
   account-summary.js  按账号汇总
 tests/
-  run-all.sh              一键跑全部自检（326 项）
-  test-menu-labels.mjs    菜单文案 34 项
+  run-all.sh              一键跑全部自检（481 项）
+  test-menu-labels.mjs    菜单文案 38 项（含设备名截断长度）
   test-commands.mjs       命令注册一致性 14 项（两份清单比对）
-  test-integration.mjs    集成 73 项（含假 KV 实现）
-  test-add-account.mjs    添加账号流程 56 项（含假 KV + 假 Telegram）
-  test-credential.mjs     凭据失效处理 41 项（分类 / 告警 / 清理 / 体检）
+  test-integration.mjs    集成 118 项（含假 KV 实现）
+  test-add-account.mjs    添加账号流程 114 项（含地域中文名 + 自动命名）
+  test-credential.mjs     凭据失效处理 78 项（分类 / 告警 / 清理 / 体检）
   test-scripts.sh         部署脚本 108 项（结构、安全、演练模式、菜单）
   test-launcher.ps1       Windows 启动器 11 项（PowerShell）
 menu.sh               交互式主菜单（唯一入口，推荐）

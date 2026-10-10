@@ -14,6 +14,7 @@
 import * as api from './aliyun-api.js';
 import * as common from './common.js';
 import { buildSummaryText } from './account-summary.js';
+import { regionDisplayWithCode } from './region-names.js';
 
 const STATUS_CN = { Running: '运行中', Stopped: '已停止' };
 
@@ -54,6 +55,8 @@ export async function buildStatus(config) {
     }
     lines.push(`\u00b7 ${name}`);
     lines.push(`  状态: ${statusCn}`);
+    // 带上中文地域名：光看机器名有时认不出在哪（用户可能自己起过名字）
+    lines.push(`  地域: ${regionDisplayWithCode(user?.region)}`);
   }
   lines.push('');
   lines.push(`时间: ${common.nowLocal().toISOString().replace('T', ' ').slice(0, 16)}`);
@@ -93,6 +96,7 @@ export async function buildTraffic(config) {
     const remain = freeGb - traffic;
 
     lines.push(`\u00b7 ${name}`);
+    lines.push(`  地域: ${regionDisplayWithCode(region)}`);
     lines.push(`  已用: ${gb(traffic)} GB / 阈值 ${limit.toFixed(0)} GB`);
     lines.push(`  免费额度: ${freeGb.toFixed(0)} GB（${area}）`);
     if (remain >= 0) {
@@ -400,6 +404,7 @@ export async function buildReport(config) {
 
     lines.push(`\u00b7 ${name}（${detail.spec}）`);
     lines.push(`  状态: ${statusChinese(detail.status)}`);
+    lines.push(`  地域: ${regionDisplayWithCode(region)}`);
     lines.push(`  公网IP: ${detail.ip}`);
     lines.push(`  流量: ${trafficStr} / 阈值 ${quota.toFixed(0)}GB`);
 

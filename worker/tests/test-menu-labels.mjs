@@ -150,6 +150,35 @@ check('空串安全', M.stripIcon('') === '');
 check('null 安全', M.stripIcon(null) === '');
 
 // ---------------------------------------------------------------------------
+console.log('--- 6. 设备名截断长度（自动命名是「中文地域-账号标识-尾号」三段式）---');
+// ⚠️ 这组断言是为了钉死一个真实的坑：DEVICE_NAME_MAX 若太小（曾为 12），
+//    会把三段式名字里**唯一用来区分同类机器的那一段（尾号）**截掉，
+//    导致菜单里同账号同地域的多台机器长得一模一样。
+{
+  const autoName = '马尼拉-LTAI5t-3stsujw0r'; // buildName 的产物
+  console.log(`  自动命名: ${autoName}（${[...autoName].length} 字符）`);
+  check('自动命名不会被截断',
+    !M.buildDeviceButton(autoName).includes('\u2026'),
+    M.buildDeviceButton(autoName));
+  check('截断长度容得下三段式名字',
+    M.DEVICE_NAME_MAX >= [...autoName].length,
+    `DEVICE_NAME_MAX=${M.DEVICE_NAME_MAX}，名字 ${[...autoName].length} 字符`);
+
+  // 最关键的一条：同为马尼拉、同账号的两台机器，按钮必须能区分开
+  const a = M.buildDeviceButton('马尼拉-LTAI5t-3stsujw0r');
+  const b = M.buildDeviceButton('马尼拉-LTAI5t-9abcdefghij');
+  console.log(`    机器A按钮: ${a}`);
+  console.log(`    机器B按钮: ${b}`);
+  check('同地域同账号的两台机器，按钮能区分', a !== b);
+
+  // 最长的中文地域名（武汉本地 4 字）也不该被截断
+  const longest = '武汉本地-LTAI5t-3stsujw0r';
+  check('最长的中文地域名也不被截断',
+    !M.buildDeviceButton(longest).includes('\u2026'),
+    `「${longest}」共 ${[...longest].length} 字符`);
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(`===== 结果: 通过 ${pass} / 失败 ${fail} =====`);
 process.exit(fail === 0 ? 0 : 1);

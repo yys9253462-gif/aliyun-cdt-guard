@@ -22,6 +22,7 @@
 import * as common from './common.js';
 import * as api from './aliyun-api.js';
 import { credentialReason } from './credential-error.js';
+import { regionDisplayWithCode } from './region-names.js';
 
 // 把识别逻辑再导出一次，方便调用方从本模块一并取用（实际实现在 credential-error.js）
 export { credentialReason };
@@ -145,8 +146,11 @@ export async function scanAccount(ak, sk) {
  * 只在「凭据通过但拿不到地域列表」这种极罕见情况下用。
  * 之所以要兜底：宁可多扫几个确定存在的地域，也不要因为一个接口异常
  * 就让用户完全看不到自己的机器。
+ *
+ * ⚠️ 导出是为了让测试能断言「这里面每个地域都有中文名」——
+ *    否则扫描结果会出现「地域 ap-southeast-2」这种半中半英的尴尬。
  */
-const FALLBACK_REGIONS = [
+export const FALLBACK_REGIONS = [
   'cn-hangzhou', 'cn-shanghai', 'cn-beijing', 'cn-shenzhen', 'cn-guangzhou',
   'cn-chengdu', 'cn-hongkong', 'cn-zhangjiakou', 'cn-qingdao',
   'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-southeast-5',
@@ -180,8 +184,10 @@ export function formatScanResult(instances, maxShow = 20) {
     const quota = `${api.isOverseasRegion(item.region)
       ? api.FREE_QUOTA_OVERSEAS_GB
       : api.FREE_QUOTA_MAINLAND_GB}GB 免费额度`;
+    // 地域给「中文名（代码）」：中文名让你一眼认得出是哪个机房，
+    // 代码是唯一标识（查控制台/搜索/开工单都要用），两个都给才够用。
     lines.push(`${i + 1}. ${name}`);
-    lines.push(`   地域 ${item.region} · ${item.status || '未知状态'} · ${quota}`);
+    lines.push(`   地域 ${regionDisplayWithCode(item.region)} · ${item.status || '未知状态'} · ${quota}`);
     lines.push(`   ${item.instanceId}`);
   }
 

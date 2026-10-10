@@ -358,6 +358,25 @@ scan_account_instances() {
     const pe = s => encodeURIComponent(s)
       .replace(/\+/g,"%20").replace(/\*/g,"%2A").replace(/%7E/g,"~");
 
+    // 地域代码 -> 中文名（与 src/region-names.js 保持同一份口径，别只改一边）
+    const REGION_CN = {
+      "cn-qingdao":"青岛","cn-beijing":"北京","cn-zhangjiakou":"张家口",
+      "cn-huhehaote":"呼和浩特","cn-wulanchabu":"乌兰察布","cn-hangzhou":"杭州",
+      "cn-shanghai":"上海","cn-nanjing":"南京本地","cn-fuzhou":"福州本地",
+      "cn-shenzhen":"深圳","cn-heyuan":"河源","cn-guangzhou":"广州",
+      "cn-wuhan-lr":"武汉本地","cn-chengdu":"成都","cn-zhongwei":"中卫",
+      "cn-hongkong":"中国香港",
+      "ap-southeast-1":"新加坡","ap-southeast-2":"悉尼","ap-southeast-3":"吉隆坡",
+      "ap-southeast-4":"墨尔本","ap-southeast-5":"雅加达","ap-southeast-6":"马尼拉",
+      "ap-southeast-7":"曼谷","ap-southeast-8":"柔佛","ap-northeast-1":"东京",
+      "ap-northeast-2":"首尔","ap-south-1":"孟买",
+      "us-west-1":"硅谷","us-east-1":"弗吉尼亚","us-southeast-1":"亚特兰大",
+      "na-south-1":"墨西哥","eu-central-1":"法兰克福","eu-west-1":"伦敦",
+      "eu-west-2":"巴黎","me-east-1":"迪拜","me-central-1":"利雅得","sa-east-1":"圣保罗"
+    };
+    // 未知地域回退成**原代码**（能拿去搜索/查控制台），不是「未知地域」
+    const regionCN = r => REGION_CN[String(r||"").toLowerCase()] || String(r||"未知地域");
+
     async function call(endpoint, action, version, extra) {
       const params = Object.assign({
         Format:"JSON", Version:version, AccessKeyId:AK, SignatureMethod:"HMAC-SHA1",
@@ -435,7 +454,8 @@ scan_account_instances() {
               || ((i.PublicIpAddress||{}).IpAddress||[])[0] || "无公网IP";
             lines.push("    · "+(i.InstanceName||"(未命名)"));
             lines.push("       实例ID: "+i.InstanceId);
-            lines.push("       地域:   "+region+"   状态: "+i.Status+"   IP: "+ip);
+            lines.push("       地域:   "+regionCN(region)+"（"+region+"）   状态: "+i.Status);
+            lines.push("       IP:     "+ip);
           }
         } catch(e) { /* 该地域无机器或没权限，跳过 */ }
       }

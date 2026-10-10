@@ -464,6 +464,231 @@ console.log('--- 12. 契约一致性：免费额度必须来自单一来源（�
 }
 
 // ---------------------------------------------------------------------------
+console.log('--- 13. 地域中文名映射（本轮新增）---');
+{
+  const R = await import('../src/region-names.js');
+
+  // 13a. 老大自己的机器所在地域 —— 最该对的一条
+  check('ap-southeast-6 是「马尼拉」', R.regionDisplayName('ap-southeast-6') === '马尼拉',
+    R.regionDisplayName('ap-southeast-6'));
+
+  // 13b. 逐个抽查关键地域（覆盖内地/香港/亚太/欧美/中东）
+  const spot = [
+    ['cn-hangzhou', '杭州'],
+    ['cn-beijing', '北京'],
+    ['cn-wulanchabu', '乌兰察布'],
+    ['cn-wuhan-lr', '武汉本地'],
+    ['cn-hongkong', '中国香港'],
+    ['ap-southeast-1', '新加坡'],
+    ['ap-northeast-1', '东京'],
+    ['ap-northeast-2', '首尔'],
+    ['ap-southeast-7', '曼谷'],
+    ['us-west-1', '硅谷'],
+    ['us-east-1', '弗吉尼亚'],
+    ['eu-central-1', '法兰克福'],
+    ['me-east-1', '迪拜'],
+    ['sa-east-1', '圣保罗'],
+  ];
+  for (const [code, cn] of spot) {
+    check(`${code} → ${cn}`, R.regionDisplayName(code) === cn, R.regionDisplayName(code));
+  }
+
+  // 13c. 大小写不敏感（接口万一返回大写也不该失效）
+  check('大小写不敏感', R.regionDisplayName('AP-SOUTHEAST-6') === '马尼拉');
+
+  // 13d. 🔴 未知地域必须回退成**原代码**，不能回退成「未知地域」四个字。
+  //      回退成代码至少还能查；回退成「未知地域」等于把信息抹掉。
+  check('未知地域回退成原代码（不是「未知地域」）',
+    R.regionDisplayName('xx-future-9') === 'xx-future-9',
+    R.regionDisplayName('xx-future-9'));
+  check('带代码渲染时未知地域不重复括号',
+    R.regionDisplayWithCode('xx-future-9') === 'xx-future-9',
+    R.regionDisplayWithCode('xx-future-9'));
+  check('空值与 null 有兜底', R.regionDisplayName('') === '未知地域'
+    && R.regionDisplayName(null) === '未知地域');
+
+  // 13e. 带代码渲染：中文名在前、代码在后（两个都要给，用户既认得出也不会用错）
+  check('regionDisplayWithCode 形如「马尼拉（ap-southeast-6）」',
+    R.regionDisplayWithCode('ap-southeast-6') === '马尼拉（ap-southeast-6）',
+    R.regionDisplayWithCode('ap-southeast-6'));
+
+  // 13f. 表本身的质量：键必须全小写（否则查表时的 toLowerCase 会让某些条目永远命不中）
+  const badKeys = Object.keys(R.REGION_CN).filter((k) => k !== k.toLowerCase());
+  check('映射表所有键都是小写', badKeys.length === 0, badKeys.join(','));
+
+  // 13g. 值里不能有英文字母（这是给老大看的，必须全中文）
+  const latinValues = Object.entries(R.REGION_CN)
+    .filter(([, v]) => /[A-Za-z]/.test(v));
+  check('映射表所有中文名不含英文字母', latinValues.length === 0,
+    latinValues.map(([k, v]) => `${k}=${v}`).join(' , '));
+
+  // 13h. 不能有重复的中文名（否则两个地域显示一样，用户分不清）
+  const names = Object.values(R.REGION_CN);
+  check('中文名无重复', new Set(names).size === names.length,
+    names.filter((n, i) => names.indexOf(n) !== i).join(','));
+
+  // 13i. 覆盖度：扫描兜底清单里的地域必须**全部**有中文名
+  //      （否则扫描时会出现「地域 ap-southeast-2」这种半中半英的尴尬）
+  const scanMod = await import('../src/account-scan.js');
+  const missing = scanMod.FALLBACK_REGIONS.filter((r) => !R.isKnownRegion(r));
+  check('扫描用的兜底地域清单全部有中文名', missing.length === 0,
+    `缺: ${missing.join(', ')}`);
+
+  // 13j. 扫描结果排版里必须出现中文地域名 + 代码
+  const scanText = scanMod.formatScanResult([
+    { instanceId: 'i-abc', instanceName: '马尼拉节点', region: 'ap-southeast-6', status: 'Running' },
+  ]);
+  check('扫描文案显示中文地域名', scanText.includes('马尼拉'), scanText);
+  check('扫描文案同时保留地域代码', scanText.includes('ap-southeast-6'));
+}
+
+// ---------------------------------------------------------------------------
+console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 + 尾号 ---');
+{
+  const R = await import('../src/region-names.js');
+
+  // 走完整流程拿到真实产物（buildName 是内部函数，只能从 confirmAddAccount 观察）
+  async function nameOf(region, instanceId, ak) {
+    const env = freshEnv();
+    installFakeFetch();
+    const chat = `name-${region}-${instanceId}-${ak}`.slice(0, 40);
+    await common.setWizard(env, chat, {
+      step: addAccount.STEP_CONFIRM,
+      ak, sk: 'fakeSecretForTesting0000000000',
+      instances: [{ instanceId, instanceName: '', region, status: 'Running' }],
+    });
+    const w = await common.getWizard(env, chat);
+    await addAccount.confirmAddAccount(env, TOKEN, chat, w);
+    const cfg = await common.loadConfig(env);
+    return cfg.users[0]?.name;
+  }
+
+  const AK = 'LTAI5tTestKeyFakeValue0';
+
+  // 14a. 三段式：中文地域名 - 账号标识 - 尾号
+  //      注意 i-5ts7fo7n0ui3stsujw0r 的最后 6 位是 **sujw0r**（不是 3stsujw0r）
+  const n1 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', AK);
+  console.log(`    ap-southeast-6 无名机器 → 「${n1}」`);
+  check('用中文地域名而不是代码', n1.includes('马尼拉') && !n1.includes('ap-southeast-6'), n1);
+  check('尾巴带上了账号标识（打码 AK 前 6 位）', n1.includes('LTAI5t'), n1);
+  check('带上了机器 ID 尾号（后 6 位 sujw0r）', n1.endsWith('sujw0r'), n1);
+  check('完整形态是「马尼拉-LTAI5t-sujw0r」',
+    n1 === '马尼拉-LTAI5t-sujw0r', n1);
+  check('三段用短横线连接', n1.split('-').length === 3, n1);
+
+  // 14b. 同地域、**不同账号** → 名字必须能区分开（这正是老大要的效果）
+  const n2 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', 'LTAI5tOtherAccount9999');
+  console.log(`    同地域换账号 → 「${n2}」`);
+  // ⚠️ 这里刻意**不**断言 n1 !== n2：两个假 AK 的「前 6 位」本来就是同一个 LTAI5t，
+  //    按设计它们会得到同样的账号标识。真正能区分账号的是「账号汇总」里的
+  //    akDisplay（前 6 + **** + 后 4）。见 14b2。
+  check('同前缀账号的标识相同（这是设计的取舍，靠汇总页的后 4 位区分）',
+    n1 === n2, `${n1} vs ${n2}`);
+
+  // 14b2. ⭐ 真正要保证的是：**不同前 6 位**的账号一定区分得开
+  const n2b = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', 'LTAI9xAnotherAcc000000');
+  console.log(`    换一个前缀不同的账号 → 「${n2b}」`);
+  check('前缀不同的账号，机器名能区分', n2b.includes('LTAI9x') && n2b !== n1, n2b);
+
+  // 14c. 同账号、**同地域**、不同机器 → 靠尾号区分
+  const n3 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3zzzzzzz', AK);
+  console.log(`    同地域同账号另一台 → 「${n3}」`);
+  check('同账号同地域靠尾号区分', n3 !== n1, `${n3} vs ${n1}`);
+  check('尾号确实是新机器的尾号（zzzzzz）', n3.endsWith('zzzzzz'), n3);
+
+  // 14d. 内地地域也用中文
+  const n4 = await nameOf('cn-hangzhou', 'i-abcdefghijklmnop', AK);
+  console.log(`    内地无名机器 → 「${n4}」`);
+  check('内地地域也中文化', n4.startsWith('杭州-'), n4);
+
+  // 14e. AK 为空时不能拼出双横线的怪名字
+  const n5 = await nameOf('cn-beijing', 'i-xyzxyzxyzxyzxyz', '');
+  console.log(`    AK 为空 → 「${n5}」`);
+  check('AK 为空时不出现双横线', !n5.includes('--'), n5);
+  check('AK 为空时仍是「地域-尾号」两段', n5 === '北京-xyzxyz', n5);
+
+  // 14f. ⭐ 最关键：已经在监控里的机器**不能**因为本轮改动被改名。
+  //      用户可能已经手动改成了「菲律宾节点」——换密钥时也必须保住。
+  {
+    const env = freshEnv();
+    installFakeFetch();
+    const chat = 'keep-name-0001';
+    await common.saveConfig(env, {
+      telegram: { chat_id: chat },
+      users: [{
+        name: '菲律宾节点', instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+        region: 'ap-southeast-6', ak: 'LTAI5tOLDdeleted000000',
+        sk: 'OLDsecretWhichWasDeleted00000000', traffic_limit: 180, paused: false,
+      }],
+    });
+    await common.setWizard(env, chat, {
+      step: addAccount.STEP_CONFIRM,
+      ak: AK, sk: 'fakeSecretForTesting0000000000',
+      instances: [{ instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: '', region: 'ap-southeast-6', status: 'Running' }],
+    });
+    const w = await common.getWizard(env, chat);
+    await addAccount.confirmAddAccount(env, TOKEN, chat, w);
+    const cfg = await common.loadConfig(env);
+    check('换密钥时已有机器名不被新命名规则覆盖',
+      cfg.users[0]?.name === '菲律宾节点', cfg.users[0]?.name);
+  }
+
+  // 14g. 阿里云上用户自己起了名字 → 必须原样用，不能套我们的三段式
+  {
+    const n6 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', AK).then(async () => {
+      const env = freshEnv();
+      installFakeFetch();
+      const chat = 'named-by-user-001';
+      await common.setWizard(env, chat, {
+        step: addAccount.STEP_CONFIRM,
+        ak: AK, sk: 'fakeSecretForTesting0000000000',
+        instances: [{
+          instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: '我的生产机',
+          region: 'ap-southeast-6', status: 'Running',
+        }],
+      });
+      const w = await common.getWizard(env, chat);
+      await addAccount.confirmAddAccount(env, TOKEN, chat, w);
+      const cfg = await common.loadConfig(env);
+      return cfg.users[0]?.name;
+    });
+    check('阿里云已有实例名时原样沿用', n6 === '我的生产机', n6);
+  }
+
+  // 14h. 地域映射表必须真的被用上（防止「改了表但没接线」）
+  check('页面渲染函数与命名规则用的是同一张表',
+    R.regionDisplayName('ap-southeast-6') === '马尼拉');
+
+  // 14i. 🔴 横向一致性：configure.sh 里内联了一份**同口径**的地域映射表
+  //      （因为那个脚本独立跑 node，没法 import 项目模块）。
+  //      两份必须一致 —— 否则会出现「机器人里显示马尼拉、脚本里显示 ap-southeast-6」
+  //      这种同一件事两种说法的情况，而这属于「不报错、只是前后矛盾」的静默问题。
+  {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+    const sh = fs.readFileSync(path.join(here, '..', 'configure.sh'), 'utf8');
+
+    const mismatched = [];
+    for (const [code, cn] of Object.entries(R.REGION_CN)) {
+      // 只在脚本里**声明过**的键上比对（金融云等脚本没写的键跳过）
+      const m = sh.match(new RegExp(`"${code}"\\s*:\\s*"([^"]+)"`));
+      if (m && m[1] !== cn) mismatched.push(`${code}: 模块=${cn} 脚本=${m[1]}`);
+    }
+    check('configure.sh 里的地域中文名与模块一致', mismatched.length === 0,
+      mismatched.join(' | '));
+
+    // 脚本里也必须全中文（不能有漏掉没翻译的）
+    const shScope = sh.slice(sh.indexOf('const REGION_CN = {'));
+    const shTable = shScope.slice(0, shScope.indexOf('};'));
+    const latinInSh = [...shTable.matchAll(/"[^"]+"\s*:\s*"([A-Za-z][^"]*)"/g)]
+      .map((x) => x[1]);
+    check('configure.sh 的地域名不含英文残留', latinInSh.length === 0,
+      latinInSh.join(','));
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log('==========================================');
 console.log(`添加账号流程自检: 通过 ${pass} / 失败 ${fail}`);

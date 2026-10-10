@@ -37,6 +37,7 @@ import * as common from './common.js';
 import * as tg from './telegram.js';
 import * as L from './menu-labels.js';
 import { scanAccount, formatScanResult, CRED_OK, CRED_BAD, CRED_UNKNOWN } from './account-scan.js';
+import { regionDisplayName } from './region-names.js';
 
 /** 流程步骤名（存进 KV 的状态字段） */
 export const STEP_ASK_AK = 'ask_ak';
@@ -339,8 +340,9 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
 
     if (pos === undefined) {
       // 新机器：整条追加
+      const name = buildName(item, ak);
       users.push({
-        name: buildName(item),
+        name,
         instance_id: instanceId,
         region: String(item.region || '').trim(),
         ak,
@@ -352,7 +354,7 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
       });
       existingIndex.set(instanceId, users.length - 1);
       added += 1;
-      addedNames.push(buildName(item));
+      addedNames.push(name);
       continue;
     }
 
@@ -372,8 +374,12 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
       users[pos] = Object.assign({}, old, {
         ak,
         sk: newSk,
-        // 机器名以「用户现有配置」为准：只有原来没名字时才用扫描结果补一个
-        name: String(old.name || '').trim() || buildName(item),
+        // 机器名以「用户现有配置」为准：只有原来没名字时才用扫描结果补一个。
+        // ⚠️ 尤其注意：**换密钥时绝对不能覆盖已有的名字** ——
+        //    用户可能已经手动改成了「菲律宾节点」这种好记的名字，
+        //    而且旧名字里的账号标识（LTAI5t）本来也还是旧 AK 的，
+        //    虽然对不上新 AK，但那也是用户自己的选择，不该被系统改掉。
+        name: String(old.name || '').trim() || buildName(item, ak),
         region: String(old.region || '').trim() || String(item.region || '').trim(),
       });
       updated += 1;
@@ -419,6 +425,12 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
   lines.push('');
   lines.push(`当前共监控 ${total} 台机器，分属 ${accounts} 个账号。`);
   lines.push(`默认阈值 ${DEFAULT_TRAFFIC_LIMIT}GB —— 想改就进「单机操作」逐台调。`);
+  if (added) {
+    // 说明自动命名的规则，否则用户看到「马尼拉-LTAI5t-3stsujw0r」会一头雾水
+    lines.push('');
+    lines.push('（阿里云上没起名字的机器，我按「中文地域-账号标识-机器尾号」自动命名，');
+    lines.push('  比如「马尼拉-LTAI5t-3stsujw0r」。账号标识就是「账号汇总」里显示的前 6 位。）');
+  }
   lines.push('');
   lines.push('机器人会在下一次巡检（最多 5 分钟）时按新凭据开始工作。');
 
@@ -475,13 +487,49 @@ export function maskAk(ak) {
 /**
  * 给机器起个名字。
  *
- * 优先用阿里云上的实例名；没有的话用「地域 + 实例 ID 后 6 位」——
- * 这样即使实例没命名，你在菜单里也能一眼分清是哪台。
+ * 优先用阿里云上的实例名（那是用户自己起的，最准）。
+ * 没有的话，按「**中文地域名 - 账号标识 - 实例 ID 后 6 位**」自动生成，
+ * 例如：`马尼拉-LTAI5t-3stsujw0r`。
+ *
+ * 三段各有各的用处（老大的要求是「不光要加中文名，还要在尾巴看出是哪个账号的」）：
+ *   · 马尼拉       —— 一眼知道在哪个机房（以前是 ap-southeast-6，看不懂）
+ *   · LTAI5t       —— 哪把 AccessKey 在用（多账号时靠它区分归属）
+ *   · 3stsujw0r    —— 同一地域、同一账号下有多台时靠它区分（ID 尾号唯一）
+ *
+ * ⚠️ 为什么账号标识用「打码 AK 的前 6 位」而不是账号序号（1/2/3）：
+ *     序号会**随着账号增删而变** —— 今天「账号2」明天可能变成「账号1」，
+ *     用户对不上；而且用户没地方查到「账号2」到底是谁。
+ *     打码 AK 的前 6 位（LTAI5t）和「账号汇总」页面上显示的**是同一套规则**
+ *     （都走 maskAk），用户在两处看到的字符串一致，一眼就能对上号。
+ *
+ * @param {object} item  扫描结果里的一台机器（含 instanceName / region / instanceId）
+ * @param {string} ak    这台机器所属账号的 AccessKey（用于生成账号标识）
  */
-function buildName(item) {
+function buildName(item, ak) {
   const rawName = String(item.instanceName || '').trim();
   if (rawName) return rawName;
-  const region = String(item.region || '').trim() || '未知地域';
+
+  const regionCn = regionDisplayName(item.region);
+  const accountTag = accountTagOf(ak);
   const tail = String(item.instanceId || '').slice(-6);
-  return `${region}-${tail}`;
+
+  const parts = [regionCn];
+  if (accountTag) parts.push(accountTag);
+  if (tail) parts.push(tail);
+  return parts.join('-');
+}
+
+/**
+ * 从 AccessKey 里取出「账号标识」——打码 AK 的前 6 位。
+ *
+ * 和「账号汇总」里显示的 `akDisplay`（前 6 + **** + 后 4）用的是同一个前缀，
+ * 所以用户在两处看到的是同一个字符串，能对上号。
+ *
+ * 取不到（AK 为空）时返回空串，调用方负责跳过这一段 ——
+ * 宁可少一段，也不要拼出 `马尼拉--3stsujw0r` 这种双横线的怪名字。
+ */
+function accountTagOf(ak) {
+  const value = String(ak || '').trim();
+  if (!value) return '';
+  return maskAk(value).slice(0, 6);
 }
