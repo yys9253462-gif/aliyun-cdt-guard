@@ -353,6 +353,57 @@ console.log('--- 9. 多个账号：逐个独立判断（一个坏不牵连另一
   }
 }
 
+console.log('--- 10. 配置与代码一致性：定时凭据体检有没有被「静默关掉」 ---');
+{
+  // 这个检查是补一个真实踩过的坑：
+  //   wrangler.toml 里配 cron 是 `0 2 * * *`，
+  //   但 index.js 分流判断写成了 `cron === '0 10 * * *'`。
+  //   两边对不上 → 定时体检**永远不会触发**，而且不报错、不崩溃、日志正常。
+  //   这类「配置值与代码常量对不上」的静默失效，只有横向对比才能发现，
+  //   所以在这里钉死。
+  const fs = await import('node:fs');
+  const url = await import('node:url');
+  const path = await import('node:path');
+
+  const here = path.dirname(url.fileURLToPath(import.meta.url));
+  const root = path.dirname(here);
+
+  const toml = fs.readFileSync(path.join(root, 'wrangler.toml'), 'utf8');
+  const src = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
+
+  // 取 wrangler.toml 里的 crons 数组
+  const m = toml.match(/crons\s*=\s*\[([^\]]*)\]/);
+  const crons = m
+    ? m[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
+    : [];
+
+  check('wrangler.toml 里配了 3 个定时任务', crons.length === 3,
+    JSON.stringify(crons));
+  check('其中包含每 5 分钟的巡检', crons.includes('*/5 * * * *'),
+    JSON.stringify(crons));
+
+  // 找出 index.js 里 isCredCheck 用的那个表达式
+  const cm = src.match(/isCredCheck\s*=\s*cron\s*===\s*['"]([^'"]+)['"]/);
+  const codeCron = cm ? cm[1] : '';
+
+  check('index.js 里能读到凭据体检的 cron 判断', Boolean(codeCron), codeCron);
+  check('🔴 凭据体检的 cron 值在「配置」与「代码」里完全一致',
+    Boolean(codeCron) && crons.includes(codeCron),
+    `代码=${codeCron} 配置=${JSON.stringify(crons)} —— 不一致则定时体检永远不触发`);
+
+  // 顺带核一下巡检那个值（同一个坑的另一个面）
+  const im = src.match(/isInspection\s*=\s*cron\s*===\s*'[^']*'\s*\|\|\s*cron\s*===\s*'([^']+)'/);
+  const inspCron = im ? im[1] : '';
+  check('🔴 巡检的 cron 值在「配置」与「代码」里完全一致',
+    Boolean(inspCron) && crons.includes(inspCron),
+    `代码=${inspCron} 配置=${JSON.stringify(crons)}`);
+
+  // 日报走的是「其余触发器」兜底分支，只要不是前两个就行，不用单独判值
+  check('凭据体检与巡检用的是两个不同的表达式（不会互相顶掉）',
+    Boolean(codeCron) && Boolean(inspCron) && codeCron !== inspCron,
+    `体检=${codeCron} 巡检=${inspCron}`);
+}
+
 console.log('');
 console.log('==========================================');
 console.log(`凭据失效处理自检: 通过 ${pass} / 失败 ${fail}`);
