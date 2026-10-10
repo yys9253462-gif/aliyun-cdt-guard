@@ -20,6 +20,7 @@ import {
   isOverseasRegion,
   getFreeQuotaGb,
 } from './aliyun-api.js';
+import { isCredentialError, credentialReason } from './credential-error.js';
 
 /**
  * 把机器按 AccessKey 分组。
@@ -170,11 +171,26 @@ export async function buildSummaryText(config) {
     }
 
     if (info.trafficGb < 0) {
-      let reason = '';
-      if (info.error !== null && info.error !== undefined) {
-        reason = `（${String(info.error).slice(0, 60)}）`;
+      // 凭据类错误要**说人话 + 给动作**，不能把阿里云英文原样丢给用户。
+      // 历史上这里直接 slice(0,60) 打印原始报错，用户看到的是一串
+      // 「ApiError: 查询 CDT 流量 失败：InvalidAccessKeyId.NotFound Specified」
+      // —— 完全不知道该怎么办（实测踩过）。
+      if (info.error && isCredentialError(info.error)) {
+        // credentialReason 的结构是「阿里云原话 + 空行 + 中文说明」，
+        // 汇总这里只要**中文说明那半段**（原话在巡检告警里已经给过，这里不必重复）。
+        const full = credentialReason(info.error);
+        const parts = String(full).split(/\n{2,}/);
+        const human = (parts.length > 1 ? parts[parts.length - 1] : full).replace(/\n+/g, ' ');
+        lines.push(`  本月用量: 查不到 —— ${human}`);
+        lines.push('  ↳ 点「➕ 添加账号」重新填一遍这把新密钥就行：'
+          + '填到同一台机器会**原地更新凭据**，不会多出一台。');
+      } else {
+        let reason = '';
+        if (info.error !== null && info.error !== undefined) {
+          reason = `（${String(info.error).slice(0, 60)}）`;
+        }
+        lines.push(`  本月用量: 查询失败${reason}`);
       }
-      lines.push(`  本月用量: 查询失败${reason}`);
       lines.push('');
       continue;
     }

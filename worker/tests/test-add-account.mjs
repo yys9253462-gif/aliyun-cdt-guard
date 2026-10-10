@@ -234,7 +234,10 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
     instances: [
       { instanceId: 'i-new1111111111111', instanceName: '东京节点', region: 'ap-northeast-1', status: 'Running', isOverseas: true },
       { instanceId: 'i-new2222222222222', instanceName: '', region: 'cn-hangzhou', status: 'Running', isOverseas: false },
-      // 这台已经在配置里了 —— 必须被跳过，不能重复加
+      // ⚠️ 这台已经在配置里了。注意：**不是完全相同的凭据**（AK 不同）——
+      //    真实场景里这就是「用户换了一把新密钥，机器还是那台机器」。
+      //    此时**必须原地更新凭据**，否则配置里留着失效旧密钥，
+      //    之后巡检/账号汇总全部报 InvalidAccessKeyId.NotFound（实测踩过）。
       { instanceId: 'i-existing00000000001', instanceName: '菲律宾节点', region: 'ap-southeast-6', status: 'Running', isOverseas: true },
     ],
   });
@@ -245,10 +248,16 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
   const after = await common.loadConfig(env);
   check('原有机器还在（配置没被覆盖）',
     after.users.some((u) => u.instance_id === 'i-existing00000000001'));
-  check('原有机器的名字没变',
+  check('原有机器的名字没被冲掉（保留用户设置）',
     after.users.find((u) => u.instance_id === 'i-existing00000000001')?.name === '菲律宾节点');
-  check('原有机器的阈值没变',
+  check('原有机器的阈值没被冲掉（保留用户设置）',
     after.users.find((u) => u.instance_id === 'i-existing00000000001')?.traffic_limit === 180);
+  // ⭐ 本轮修复的核心断言
+  check('换密钥后：原机器的 AK 被原地更新为新值',
+    after.users.find((u) => u.instance_id === 'i-existing00000000001')?.ak === 'LTAI5tNEWaccount999xyz',
+    `实际 ${after.users.find((u) => u.instance_id === 'i-existing00000000001')?.ak}`);
+  check('换密钥后：原机器的 SK 被原地更新为新值',
+    after.users.find((u) => u.instance_id === 'i-existing00000000001')?.sk === 'newSecretForSecondAccount1234567890');
 
   check('新机器加进来了（东京）',
     after.users.some((u) => u.instance_id === 'i-new1111111111111'));
@@ -279,8 +288,68 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
     (await common.getWizard(env, CHAT)) === null);
 
   check('回执里写了新增台数', allText(calls).includes('新加入 2 台'));
+  check('回执里写了更新凭据台数', allText(calls).includes('更新凭据 1 台'));
   check('回执里写了总台数', allText(calls).includes('3 台机器'));
-  check('回执里写了账号数', allText(calls).includes('2 个账号'));
+  // 注意：这里原先是「2 个账号」，但本轮修复后，那台「已存在」的机器
+  // 凭据被**原地更新成了新 AK** —— 于是三台机器都归到新 AK 名下，只剩 1 个账号。
+  // 这正是修复的预期效果（同一台机器不可能同时属于两个账号）。
+  check('回执里写了账号数（更新后只剩 1 个账号）',
+    allText(calls).includes('1 个账号'), allText(calls).slice(-120));
+}
+
+// ---------------------------------------------------------------------------
+// 6b. 换密钥后重新添加：凭据必须被原地更新（本轮修的 BUG 的专项回归）
+//     用户实际操作：删掉旧 AccessKey -> 新建一把 -> 在机器人里添加 ->
+//     扫描到还是那台机器 -> 旧代码按 instance_id 去重直接跳过 ->
+//     配置里留着**失效的旧密钥** -> 账号汇总 / 巡检报
+//     InvalidAccessKeyId.NotFound。
+// ---------------------------------------------------------------------------
+{
+  console.log('--- 6b. 换密钥后重新添加（BUG 专项回归）---');
+  const env = freshEnv();
+  const calls = installFakeFetch();
+  const CHAT = '30003';
+  await common.saveConfig(env, {
+    telegram: { chat_id: CHAT, admin_ids: [CHAT] },
+    users: [
+      // 用户原来配的：旧密钥，机器 i-5ts7fo7n0ui3stsujw0r
+      {
+        name: '菲律宾节点', instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+        region: 'ap-southeast-6', ak: 'LTAI5tOLDdeleted000000',
+        sk: 'OLDsecretWhichWasDeleted00000000',
+        traffic_limit: 180, paused: false,
+      },
+    ],
+  });
+
+  // 用户换了一把全新密钥，扫描到的**还是同一台机器**
+  await common.setWizard(env, CHAT, {
+    step: addAccount.STEP_CONFIRM,
+    ak: 'LTAI5tBRANDnewkey111111',
+    sk: 'BRANDnewSecretValue0000000000000',
+    instances: [
+      { instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: 'launch-advisor-20261010', region: 'ap-southeast-6', status: 'Running', isOverseas: true },
+    ],
+  });
+
+  const w = await common.getWizard(env, CHAT);
+  await addAccount.confirmAddAccount(env, TOKEN, CHAT, w);
+
+  const cfg = await common.loadConfig(env);
+  const m = cfg.users.find((u) => u.instance_id === 'i-5ts7fo7n0ui3stsujw0r');
+
+  check('换密钥后 AK 已更新（不再是失效的旧 AK）',
+    m?.ak === 'LTAI5tBRANDnewkey111111', `实际 ${m?.ak}`);
+  check('换密钥后 SK 已更新（不再是失效的旧 SK）',
+    m?.sk === 'BRANDnewSecretValue0000000000000', `实际 ${m?.sk}`);
+  check('没有产生第二台机器（仍是 1 台）',
+    cfg.users.length === 1, `实际 ${cfg.users.length} 台`);
+  check('用户改过的机器名没被扫描结果覆盖',
+    m?.name === '菲律宾节点', `实际 ${m?.name}`);
+  check('用户改过的阈值没被冲掉',
+    m?.traffic_limit === 180, `实际 ${m?.traffic_limit}`);
+  check('回执说明了「凭据已更新」而不是「没有新增」',
+    allText(calls).includes('凭据已更新'), allText(calls).slice(0, 120));
 }
 
 // ---------------------------------------------------------------------------

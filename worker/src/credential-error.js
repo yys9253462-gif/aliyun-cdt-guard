@@ -50,7 +50,9 @@ export function classifyError(error) {
     return {
       kind: ERR_CREDENTIAL,
       raw,
-      reason: `${raw}\n\n这个访问密钥 ID 阿里云不认识。多半是复制时漏了字符，或这对密钥已被删除。`,
+      reason: `${raw}\n\n这个访问密钥 ID 阿里云不认识。多半是复制时漏了字符，或这对密钥已被删除。\n`
+        + '如果你刚换过密钥：点「➕ 添加账号」把这台机器重新填一遍即可 —— '
+        + '同一台机器会**原地更新凭据**，不会多出一台。',
     };
   }
   if (/SignatureDoesNotMatch/i.test(raw)) {

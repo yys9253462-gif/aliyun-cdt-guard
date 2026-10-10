@@ -319,43 +319,77 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
 
   const config = await common.loadConfig(env);
   const users = Array.isArray(config.users) ? config.users.slice() : [];
-  const existingIds = new Set(users.map((u) => String(u?.instance_id || '').trim()));
+  const existingIndex = new Map();
+  for (let i = 0; i < users.length; i += 1) {
+    const id = String(users[i]?.instance_id || '').trim();
+    if (id) existingIndex.set(id, i);
+  }
 
   let added = 0;
   let skipped = 0;
+  let updated = 0;
   const addedNames = [];
+  const updatedNames = [];
 
   for (const item of instances) {
     const instanceId = String(item.instanceId || '').trim();
     if (!instanceId) continue;
 
-    // 已经在配置里了就跳过（避免重复监控同一台机器）
-    if (existingIds.has(instanceId)) {
-      skipped += 1;
+    const pos = existingIndex.get(instanceId);
+
+    if (pos === undefined) {
+      // 新机器：整条追加
+      users.push({
+        name: buildName(item),
+        instance_id: instanceId,
+        region: String(item.region || '').trim(),
+        ak,
+        // ⚠️ Secret 在这里**必须**落盘 —— 这是正式配置，
+        //    巡检时要用它签名。上一段说的「不落盘」指的是**流程临时状态**。
+        sk: String(wizard.sk || '').trim(),
+        traffic_limit: DEFAULT_TRAFFIC_LIMIT,
+        paused: false,
+      });
+      existingIndex.set(instanceId, users.length - 1);
+      added += 1;
+      addedNames.push(buildName(item));
       continue;
     }
 
-    users.push({
-      name: buildName(item),
-      instance_id: instanceId,
-      region: String(item.region || '').trim(),
-      ak,
-      // ⚠️ Secret 在这里**必须**落盘 —— 这是正式配置，
-      //    巡检时要用它签名。上一段说的「不落盘」指的是**流程临时状态**。
-      sk: String(wizard.sk || '').trim(),
-      traffic_limit: DEFAULT_TRAFFIC_LIMIT,
-      paused: false,
-    });
-    existingIds.add(instanceId);
-    added += 1;
-    addedNames.push(buildName(item));
+    // ---- 已在监控中的机器 ----
+    // ⚠️ 不能无脑跳过（历史上就是这么写的，踩过坑）：
+    //    用户「删掉旧 AccessKey、换一把新的」后，机器 ID 没变，
+    //    若按 ID 去重就整台跳过 —— 新密钥写不进去，配置里仍挂着**已失效的旧密钥**，
+    //    之后巡检 / 账号汇总全用旧密钥签名 → InvalidAccessKeyId.NotFound。
+    //    正确做法：ID 相同时比对凭据，变了就**原地更新凭据**，
+    //    同时保留用户自己改过的 name / traffic_limit / paused（别把用户设置冲掉）。
+    const old = users[pos] || {};
+    const oldAk = String(old.ak || '').trim();
+    const newSk = String(wizard.sk || '').trim();
+    const oldSk = String(old.sk || '').trim();
+
+    if (oldAk !== ak || oldSk !== newSk) {
+      users[pos] = Object.assign({}, old, {
+        ak,
+        sk: newSk,
+        // 机器名以「用户现有配置」为准：只有原来没名字时才用扫描结果补一个
+        name: String(old.name || '').trim() || buildName(item),
+        region: String(old.region || '').trim() || String(item.region || '').trim(),
+      });
+      updated += 1;
+      updatedNames.push(String(users[pos].name || instanceId));
+      continue;
+    }
+
+    // 凭据也一样：确实是重复监控，跳过
+    skipped += 1;
   }
 
-  if (!added) {
+  if (!added && !updated) {
     await common.clearWizard(env, chatId);
     await tg.sendMenu(
       token, chatId,
-      `扫描到的 ${instances.length} 台机器**都已经在监控里了**，没有新增。`,
+      `扫描到的 ${instances.length} 台机器**都已经在监控里了**（凭据也没有变化），没有改动。`,
       [[L.LBL_BACK_MAIN, L.LBL_ACCOUNTS]]
     );
     return;
@@ -368,22 +402,25 @@ export async function confirmAddAccount(env, token, chatId, wizard) {
   const total = users.length;
   const accounts = new Set(users.map((u) => String(u.ak || '').trim()).filter(Boolean)).size;
 
-  const lines = [
-    '✅ 添加成功。',
-    '',
-    `新加入 ${added} 台机器${skipped ? `（${skipped} 台已在监控中，跳过）` : ''}：`,
-  ];
-  for (const name of addedNames.slice(0, 10)) {
+  const lines = [];
+  const parts = [];
+  if (added) parts.push(`新加入 ${added} 台`);
+  if (updated) parts.push(`更新凭据 ${updated} 台`);
+  if (skipped) parts.push(`已是同样配置 ${skipped} 台`);
+  lines.push(updated && !added ? '✅ 凭据已更新。' : '✅ 添加成功。');
+  lines.push('');
+  lines.push(`${parts.join('，')}：`);
+  for (const name of addedNames.concat(updatedNames).slice(0, 10)) {
     lines.push(`· ${name}`);
   }
-  if (addedNames.length > 10) {
-    lines.push(`· ...等共 ${addedNames.length} 台`);
+  if (addedNames.length + updatedNames.length > 10) {
+    lines.push(`· ...等共 ${addedNames.length + updatedNames.length} 台`);
   }
   lines.push('');
   lines.push(`当前共监控 ${total} 台机器，分属 ${accounts} 个账号。`);
   lines.push(`默认阈值 ${DEFAULT_TRAFFIC_LIMIT}GB —— 想改就进「单机操作」逐台调。`);
   lines.push('');
-  lines.push('机器人会在下一次巡检（最多 5 分钟）时开始监控它们。');
+  lines.push('机器人会在下一次巡检（最多 5 分钟）时按新凭据开始工作。');
 
   await tg.sendMenu(token, chatId, lines.join('\n'), [
     [L.LBL_ACCOUNTS, L.LBL_OVERVIEW],
