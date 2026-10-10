@@ -49,6 +49,43 @@ function textResponse(text, status = 200) {
   });
 }
 
+/**
+ * 把 runInspection 的返回对象转成**人看得懂**的一行日志。
+ *
+ * 为什么需要这个：直接在模板字符串里插对象会得到 "[object Object]"，
+ * 日志里看不出查了几台、有没有查完，出问题时等于没有日志。
+ * （这个坑和机器人回执那个是同一个病根，只是分两处修。）
+ *
+ * 覆盖 runInspection 的全部四种返回形态：
+ *   { ok:true, skipped:true }  —— 软锁拦住，本轮没跑
+ *   { ok:true, checked:0 }     —— 配置里没有机器
+ *   { ok:true, checked:N }     —— 正常跑完
+ *   { ok:true, checked:N, partial:true, total:M } —— 子请求预算用完，没查完
+ *   { ok:false, error }        —— 整体失败
+ */
+export function formatInspectionSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return `结果异常（${typeof summary}）`;
+  }
+  if (summary.ok === false) {
+    return `失败：${summary.error || '未说明原因'}`;
+  }
+  if (summary.skipped) {
+    return '跳过（距上轮巡检过近）';
+  }
+  const checked = Number(summary.checked);
+  if (!Number.isFinite(checked) || checked <= 0) {
+    return '没有需要检查的机器';
+  }
+  if (summary.partial) {
+    // 预算用完时**必须如实说没查完**，否则运维会误以为一切正常
+    const total = Number(summary.total);
+    const totalStr = Number.isFinite(total) ? total : '?';
+    return `部分完成：已检查 ${checked}/${totalStr} 台（子请求预算用完，剩余下一轮补上）`;
+  }
+  return `已检查 ${checked} 台`;
+}
+
 export default {
   /**
    * HTTP 请求处理 —— 也就是 Webhook 与自检端点。
@@ -138,7 +175,13 @@ export default {
     if (isInspection) {
       try {
         const summary = await runInspection(env);
-        console.log(`[cron] 巡检完成: ${summary}`);
+        // ⚠️ 这里踩过一个坑（与机器人回执那个 [object Object] 是同一个病根）：
+        //     原先写的是 `巡检完成: ${summary}` —— summary 是**对象**，
+        //     插进模板字符串就变成 "巡检完成: [object Object]"，
+        //     日志里一个有用的信息都没有，出问题时完全看不出查了几台、有没有查完。
+        //     机器人回执那边第五轮已经修了，cron 日志这边当时漏了，
+        //     是第六轮部署后从 wrangler tail 的实测日志里抓出来的。
+        console.log(`[cron] 巡检完成: ${formatInspectionSummary(summary)}`);
       } catch (error) {
         console.log(`[cron] 巡检失败: ${common.redact(error)}`);
       }

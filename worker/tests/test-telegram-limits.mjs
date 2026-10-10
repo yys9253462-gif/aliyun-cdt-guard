@@ -26,6 +26,7 @@ import {
   splitMessage,
   withPageMarker,
   neutralizeMarkdown,
+  sendAlert,
 } from '../src/telegram.js';
 import {
   resetSubrequestCount,
@@ -214,6 +215,116 @@ check('预算耗尽后不会再无限发请求（有上限）',
 
 // 恢复 fetch 以免影响后续
 delete globalThis.fetch;
+
+console.log('\n===== 告警令牌来源回退（第六轮线上抓到的严重 bug）=====');
+
+// 背景：机器人令牌有两个来源 —— env.TELEGRAM_BOT_TOKEN（Cloudflare 加密变量）
+// 与 config.telegram.bot_token（配置字段）。一键脚本只写了前者，
+// 而 sendAlert 原本只读后者 → 所有告警静默丢失，机器人却照常聊天。
+// 这里验证「配置里没有令牌时，能从 env 回退取到」。
+{
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: init && init.body });
+    return {
+      json: async () => ({ ok: true, result: { message_id: 1 } }),
+    };
+  };
+
+  const configWithoutToken = { telegram: { chat_id: '999' } };
+
+  // 情形 1：配置没令牌、env 有令牌 → 必须能发出去
+  const ok1 = await sendAlert(
+    configWithoutToken, '流量超标已止损', '机器: A\n当前流量: 200GB',
+    'danger', null, null, { TELEGRAM_BOT_TOKEN: '111:FAKE-TOKEN-FOR-TEST' }
+  );
+  check('配置里没令牌时能从 env 回退发出告警（修复的核心）',
+    ok1 === true && calls.length > 0,
+    `返回 ${ok1}，请求数 ${calls.length}`);
+
+  // 情形 2：env 通过 config.__env 挂载（guard.checkOne 的做法）
+  calls.length = 0;
+  const configWithHiddenEnv = { telegram: { chat_id: '999' } };
+  Object.defineProperty(configWithHiddenEnv, '__env', {
+    value: { TELEGRAM_BOT_TOKEN: '222:FAKE-TOKEN-FOR-TEST' },
+    enumerable: false,
+  });
+  const ok2 = await sendAlert(
+    configWithHiddenEnv, '凭据失效', '账号 AK 已失效', 'danger'
+  );
+  check('能从 config.__env 回退取到令牌（六处老调用点不用改签名）',
+    ok2 === true && calls.length > 0,
+    `返回 ${ok2}，请求数 ${calls.length}`);
+  check('config.__env 不会被 JSON 序列化带走（密钥不进 KV）',
+    JSON.stringify(configWithHiddenEnv).indexOf('FAKE-TOKEN') < 0,
+    JSON.stringify(configWithHiddenEnv));
+
+  // 情形 3：两处都没有令牌 → 必须返回 false，且不能瞎发请求
+  calls.length = 0;
+  const ok3 = await sendAlert(
+    { telegram: { chat_id: '999' } }, '测试', '正文', 'info', null, null, {}
+  );
+  check('两处都没有令牌时返回 false（不假装成功）', ok3 === false);
+  check('没有令牌时不发起任何请求', calls.length === 0, `请求数 ${calls.length}`);
+
+  // 情形 4：配置里的令牌优先（向后兼容原有写法）
+  calls.length = 0;
+  const ok4 = await sendAlert(
+    { telegram: { bot_token: '333:FAKE-CONFIG-TOKEN', chat_id: '999' } },
+    '测试', '正文', 'info', null, null,
+    { TELEGRAM_BOT_TOKEN: '444:FAKE-ENV-TOKEN' }
+  );
+  check('配置里有令牌时正常工作（向后兼容）', ok4 === true && calls.length > 0);
+  check('配置里的令牌优先于 env',
+    calls.length > 0 && calls[0].url.includes('333:FAKE-CONFIG-TOKEN'),
+    calls.length ? calls[0].url.replace(/bot\d+:[^/]+/, 'bot<TOKEN>') : '无请求');
+
+  // 情形 5：Chat ID 也能从 env 回退
+  calls.length = 0;
+  const ok5 = await sendAlert(
+    { telegram: {} }, '测试', '正文', 'info', null, null,
+    { TELEGRAM_BOT_TOKEN: '555:FAKE-TOKEN-FOR-TEST', TELEGRAM_CHAT_ID: '888' }
+  );
+  check('Chat ID 也能从 env 回退', ok5 === true && calls.length > 0);
+
+  delete globalThis.fetch;
+}
+
+console.log('\n===== cron 日志不得出现 [object Object] =====');
+{
+  // 这个坑与机器人回执是同一个病根，只是发生在 cron 的 console.log 里。
+  // 第六轮部署后从 wrangler tail 实测日志里抓到的：
+  //   [cron] 巡检完成: [object Object]
+  const { formatInspectionSummary } = await import('../src/index.js');
+
+  const cases = [
+    [{ ok: true, checked: 1 }, (t) => t.includes('已检查 1 台')],
+    [{ ok: true, checked: 5 }, (t) => t.includes('已检查 5 台')],
+    [{ ok: true, checked: 0 }, (t) => t.includes('没有需要检查的机器')],
+    [{ ok: true, skipped: true, checked: 0 }, (t) => t.includes('跳过')],
+    [{ ok: true, checked: 3, partial: true, total: 10 },
+      (t) => t.includes('部分完成') && t.includes('3/10') && t.includes('预算')],
+    [{ ok: false, error: 'KV 读取超时' }, (t) => t.includes('失败') && t.includes('KV 读取超时')],
+    [{ ok: false }, (t) => t.includes('失败')],
+  ];
+  for (const [summary, verify] of cases) {
+    let text;
+    try { text = formatInspectionSummary(summary); }
+    catch (e) { check(`格式化 ${JSON.stringify(summary).slice(0, 40)}`, false, `抛异常 ${e.message}`); continue; }
+    check(`格式化 ${JSON.stringify(summary).slice(0, 40)}`,
+      verify(text) && !text.includes('object'), `实际：${text}`);
+  }
+
+  // 硬性守卫：任何异常输入都不得吐 [object Object]
+  const evil = [null, undefined, 'oops', 42, [], { ok: true, checked: {} },
+    { ok: true, checked: [] }, { ok: true, checked: null }];
+  for (const s of evil) {
+    let t;
+    try { t = formatInspectionSummary(s); } catch (e) { t = `抛异常 ${e.message}`; }
+    check(`异常输入不得出现 [object Object]（${JSON.stringify(s)}）`,
+      !String(t).includes('[object Object]'), String(t));
+  }
+}
 
 console.log(`\nTelegram 发送层自检：通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail > 0 ? 1 : 0);

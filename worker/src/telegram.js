@@ -419,15 +419,44 @@ export async function getWebhookInfo(token) {
  *        `[[{ text, callback_data }]]`。传了就让告警消息自带操作按钮
  *        （例如「凭据失效」告警带一个「🗑 删除这台机器」）——
  *        用户可以直接在告警里点按钮处理，不用再去翻菜单。
+ * @param {object|null} env 可选。用来在配置里找不到令牌时回退到
+ *        Cloudflare 上的 TELEGRAM_BOT_TOKEN 加密变量 —— 见下方注释。
  */
-export async function sendAlert(config, title, body, level = 'info', logger = null, keyboard = null) {
+export async function sendAlert(
+  config, title, body, level = 'info', logger = null, keyboard = null, env = null,
+) {
   const telegram = (config && config.telegram) || {};
-  const token = (telegram.bot_token || '').trim();
-  const chatId = telegram.chat_id;
+  // env 的三条获取路径（按优先级）：
+  //   1. 显式传进来的第 7 个参数（新代码推荐这样用）；
+  //   2. config.__env —— guard.checkOne 挂上去的不可枚举引用
+  //      （这样六处老调用点不用一个个改签名就能拿到 env）；
+  //   3. 都没有就只能靠配置里的 bot_token。
+  const effectiveEnv = env || (config && config.__env) || null;
+  // ⚠️ 这里踩过一个**影响很大但完全不报错**的坑（第六轮从线上日志抓出来的）：
+  //     机器人令牌在项目里有**两个来源**：
+  //       · env.TELEGRAM_BOT_TOKEN  —— Cloudflare 上的加密变量，收发消息用它
+  //       · config.telegram.bot_token —— 配置 JSON 里的字段
+  //     一键脚本只写了前者（后者留空，因为不想把令牌明文塞进 KV），
+  //     而这里原本**只读后者**。
+  //
+  //     后果：机器人正常聊天、菜单正常点，一切看起来都好，
+  //     但**所有主动告警（流量超标、凭据失效、余额不足、自动关机）全部静默丢失** ——
+  //     只会在日志里留下一句「没有配置 Telegram，通知未发送」，
+  //     而这句话看起来像是「你本来就没配」，很容易被当成正常现象略过。
+  //     真正需要报警的时候一条都收不到，这是最不能接受的失败方式。
+  //
+  //     修法：配置里没有就回退到环境变量，两条路都试一遍。
+  const token = String(
+    telegram.bot_token || (effectiveEnv && effectiveEnv.TELEGRAM_BOT_TOKEN) || ''
+  ).trim();
+  // chat_id 同理：配置里没有就看看环境变量（一键脚本两种写法都可能出现）
+  const chatId = telegram.chat_id || (effectiveEnv && effectiveEnv.TELEGRAM_CHAT_ID) || '';
 
   if (!token || !chatId) {
     if (logger) {
-      logger('没有配置 Telegram，通知未发送');
+      logger(
+        '没有配置 Telegram（令牌与 Chat ID 至少要各有一个来源），通知未发送'
+      );
     }
     return false;
   }

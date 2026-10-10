@@ -514,6 +514,29 @@ async function checkOne(env, user, config, state, logger, collector) {
   const name = user.name || instanceId;
   const key = instanceId;
 
+  // 把 env 挂到 config 上带下去。
+  //
+  // 为什么这么做（而不是给每个子函数都加一个 env 参数）：
+  //     「告警发不出去」那个坑的根因是 sendAlert 拿不到 env，
+  //     所以它读不到 Cloudflare 上的 TELEGRAM_BOT_TOKEN。
+  //     sendAlert 的调用点散布在 trackStatusChange / checkQuotaProgress /
+  //     checkMoney / tryStart / enforceStop / handleCheckFailure 六个函数里，
+  //     逐个加参数要改 6 个签名 + 全部调用处，改动面大且容易漏。
+  //     而这些函数**都已经收到 config 了**，借用它带下去最省事。
+  //
+  // 为什么用 defineProperty 而不用 config.env = env：
+  //     普通赋值会让 env 变成**可枚举属性**，一旦 config 被 JSON.stringify
+  //     回写 KV，整个环境变量（含 Telegram 令牌、阿里云密钥）就会被写进 KV。
+  //     不可枚举属性不会被 JSON.stringify 带走，既传下去了又不会泄漏。
+  if (env && config && !Object.prototype.hasOwnProperty.call(config, '__env')) {
+    Object.defineProperty(config, '__env', {
+      value: env,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+  }
+
   if (user.paused) {
     logger(`[${name}] 监控已暂停，跳过`);
     return;
