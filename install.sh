@@ -524,14 +524,15 @@ self_test() {
     [ "$missing" -eq 0 ] && info "程序文件齐全"
 
     echo ""
-    echo "2) 检查阿里云接口连通性并发送测试通知..."
+    echo "2) 检查阿里云接口连通性..."
     "$python_bin" - <<'PY'
 import json, os, sys
 sys.path.insert(0, os.environ.get("CDT_GUARD_DIR", "/opt/cdt-guard"))
 import common, aliyun_api
-from notifier import send_alert
 
 config = common.load_config()
+logger = common.build_logger("self_test", "/opt/cdt-guard/selftest.log")
+
 ok_any = False
 for user in config.get("users", []):
     name = user.get("name") or user["instance_id"]
@@ -543,17 +544,60 @@ for user in config.get("users", []):
         print("   [失败] %s 流量查询失败：%s" % (name, common.redact(error)))
         print("          常见原因：AccessKey 填错 / 未授予 CDT 权限 / 地域填错")
 
-if ok_any:
-    send_alert(config, "安装成功",
-               "CDT 流量守护已在本机部署完成。\n每 5 分钟巡检一次，每天 9:00 发送报表。\n收到这条消息说明通知渠道正常。",
-               "info")
-    print("   已尝试发送一条测试通知，请查看手机 / QQ 是否收到。")
-    if (config.get("onebot") or {}).get("base_url"):
-        print("   OneBot 通道已启用（参与告警 + 日报）。")
-    if (config.get("qq") or {}).get("app_id"):
-        print("   QQ 官方通道已启用（仅日报，受官方每月 4 条配额限制）。")
+print("")
+print("3) 逐个通知渠道发送测试消息...")
+from notifier import send_alert, _send_telegram, _build_onebot, telegram_reachable
+
+sent_ok = False
+tg = config.get("telegram") or {}
+if tg.get("bot_token") and tg.get("chat_id"):
+    reachable, why = telegram_reachable()
+    if not reachable:
+        print("   [失败] Telegram 网络不通：%s" % why)
+        print("          本机无法访问 api.telegram.org，需先配置代理再试。")
+        print("          提示：阿里云海外节点通常可直连；国内节点一般需要代理。")
+    else:
+        r = _send_telegram(tg["bot_token"], tg["chat_id"],
+                           "CDT 流量守护 - Telegram 通道测试成功", logger)
+        print("   [%s] Telegram" % ("正常" if r else "失败"))
+        if r:
+            sent_ok = True
+        else:
+            print("          网络可达，但发送被拒。检查 Bot Token 与 Chat ID 是否正确，")
+            print("          以及你是否先给这个机器人发过一条消息（否则它无权主动联系你）。")
 else:
-    print("   所有实例查询均失败，暂未发送测试通知。请检查配置后重新运行本脚本。")
+    print("   [跳过] Telegram（未配置）")
+
+onebot = _build_onebot(config, logger)
+if onebot:
+    r = onebot.send("CDT 流量守护 - OneBot 通道测试成功")
+    print("   [%s] OneBot" % ("正常" if r else "失败"))
+    if r:
+        sent_ok = True
+    else:
+        print("          可能原因：地址不通 / Token 错 / 目标 ID 错")
+else:
+    print("   [跳过] OneBot（未配置）")
+
+qq = config.get("qq") or {}
+if qq.get("app_id"):
+    print("   [说明] QQ 官方通道（仅日报，不发测试告警，受每月 4 条配额限制）")
+else:
+    print("   [跳过] QQ 官方（未配置）")
+
+print("")
+if sent_ok:
+    print("   自检完成：至少一个通知渠道可用，测试消息已发出。")
+elif tg.get("bot_token") or (config.get("onebot") or {}).get("base_url"):
+    print("   自检完成：但**所有通知渠道都发送失败**，请按上面的原因排查。")
+    print("   注意：巡检与止损功能不受影响，仍会正常执行。")
+else:
+    print("   自检完成：没有配置任何通知渠道，将无法收到告警。")
+    print("   建议重新运行本脚本，进入菜单第 5 项配置 Telegram 或 OneBot。")
+
+if not ok_any:
+    print("")
+    print("   警告：所有实例流量查询均失败，请检查 AccessKey 与权限配置。")
 PY
 }
 

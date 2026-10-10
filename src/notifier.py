@@ -24,6 +24,39 @@ QQ_API_BASE = 'https://api.bot.qq.com'
 QQ_TOKEN_URL = 'https://api.bot.qq.com/app/getAppAccessToken'
 
 
+class _NullLogger:
+    """空日志器：当调用方没传 logger 时兜底使用。
+
+    为什么需要它：本模块所有出错分支都会写日志，若 logger 为 None，
+    写日志这个动作本身会抛 AttributeError，把「通知失败」升级成「程序崩溃」。
+    安装脚本自检时就是踩了这个坑 —— 恰好在没有 logger 的场景下调用，
+    结果 Telegram 一发失败就整个堆栈炸出来，掩盖了真实原因。
+    """
+    def debug(self, *a, **k):
+        pass
+
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+    def error(self, *a, **k):
+        pass
+
+    def exception(self, *a, **k):
+        pass
+
+
+_NULL_LOGGER = _NullLogger()
+
+
+def ensure_logger(logger):
+    """保证返回一个可用的日志对象，杜绝 None.xxx 崩溃。"""
+    return logger if logger is not None else _NULL_LOGGER
+
+
+
 # ============================================================================
 # Telegram
 # ============================================================================
@@ -49,7 +82,11 @@ def _split_message(text, limit=3900):
 
 
 def _send_telegram(bot_token, chat_id, text, logger, parse_markdown=True):
-    """发送 Telegram 消息。Markdown 解析失败时自动降级为纯文本重试一次。"""
+    """发送 Telegram 消息。Markdown 解析失败时自动降级为纯文本重试一次。
+
+    返回 True / False。失败原因会记入日志，便于安装自检时诊断。
+    """
+    logger = ensure_logger(logger)
     url = 'https://api.telegram.org/bot%s/sendMessage' % bot_token
     for chunk in _split_message(text):
         payloads = [{'chat_id': chat_id, 'text': chunk}]
@@ -64,11 +101,38 @@ def _send_telegram(bot_token, chat_id, text, logger, parse_markdown=True):
                     break
                 logger.error('Telegram 推送失败: HTTP %s %s',
                              resp.status_code, redact(resp.text))
+            except requests.exceptions.ProxyError as error:
+                logger.error('Telegram 推送异常（代理不可用）: %s', redact(error))
+            except requests.exceptions.ConnectTimeout:
+                logger.error('Telegram 推送超时：无法连到 api.telegram.org，'
+                             '本机可能处于受限网络，需要配置代理')
+            except requests.exceptions.SSLError as error:
+                logger.error('Telegram 推送异常（TLS 握手失败，可能被拦截）: %s',
+                             redact(error))
             except Exception as error:
                 logger.error('Telegram 推送异常: %s', redact(error))
         if not sent:
             return False
     return True
+
+
+def telegram_reachable(timeout=5):
+    """探测本机能否连上 Telegram API，用于安装自检给出准确提示。
+
+    返回 (是否可达, 说明文字)。只做 TCP/TLS 探测，不发送任何消息。
+    """
+    try:
+        resp = requests.get('https://api.telegram.org/', timeout=timeout)
+        return True, 'HTTP %s' % resp.status_code
+    except requests.exceptions.ProxyError:
+        return False, '代理不可用'
+    except requests.exceptions.ConnectTimeout:
+        return False, '连接超时（网络受限，可能需要代理）'
+    except requests.exceptions.SSLError:
+        return False, 'TLS 握手失败（可能被中间设备拦截）'
+    except Exception as error:
+        return False, redact(error)
+
 
 
 # ============================================================================
@@ -95,7 +159,7 @@ class OneBot:
         self.token = (token or '').strip()
         self.target_id = str(target_id).strip()
         self.target_type = target_type  # group 或 private
-        self.logger = logger
+        self.logger = ensure_logger(logger)
 
     def _headers(self):
         headers = {'Content-Type': 'application/json'}
@@ -171,7 +235,7 @@ class QQBot:
         self.app_secret = app_secret
         self.target_id = target_id
         self.target_type = target_type  # group 或 user
-        self.logger = logger
+        self.logger = ensure_logger(logger)
         self._token = None
         self._token_expire_at = 0
 
@@ -276,6 +340,7 @@ def send_alert(config, title, message, level='info', logger=None):
     QQ 官方通道不参与告警（配额只有每月 4 条）。
     返回 True 表示至少一个渠道发送成功。
     """
+    logger = ensure_logger(logger)
     icon = {'info': '\u2705', 'warn': '\u26a0\ufe0f', 'danger': '\U0001f6a8'}.get(level, '\u2139\ufe0f')
     text = '%s *%s*\n\n%s' % (icon, title, message)
     plain = '%s %s\n\n%s' % (
@@ -303,6 +368,7 @@ def send_report(config, message, logger=None):
 
     Telegram 与 OneBot 发全文；QQ 官方通道发摘要（配额紧张）。
     """
+    logger = ensure_logger(logger)
     ok = False
 
     tg = config.get('telegram') or {}
