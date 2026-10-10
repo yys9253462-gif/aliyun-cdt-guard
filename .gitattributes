@@ -1,0 +1,7 @@
+# 强制 shell 脚本与 Python 一律用 LF 换行
+# 否则 Windows 下提交会转成 CRLF，Linux 上执行报 bad interpreter
+*.sh    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
