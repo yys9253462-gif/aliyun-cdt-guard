@@ -105,6 +105,10 @@ Check "启动.bat 存在" (Test-Path $batPath) $batPath
 if (Test-Path $batPath) {
     $batBytes = [System.IO.File]::ReadAllBytes($batPath)
 
+    # 先把 .ps1 的文本读出来，供下面几项共用（8d-3 / 8e 都要用）
+    $ps1Path = Join-Path $scriptDir '安装.ps1'
+    $ps1Text = if (Test-Path $ps1Path) { [System.IO.File]::ReadAllText($ps1Path) } else { '' }
+
     # 8a. 必须是 CRLF 换行 —— LF 会让 cmd.exe 把 rem 注释当命令执行
     $batText = [System.Text.Encoding]::ASCII.GetString($batBytes)
     $lfOnly = ([regex]::Matches($batText, "(?<!\r)\n")).Count
@@ -123,6 +127,48 @@ if (Test-Path $batPath) {
     # 8d. 不能写死中文文件名（.bat 里写中文路径会因 GBK 解码而匹配不到）
     Check "启动.bat 用通配符定位 .ps1（不写死中文名）" ($batText -match '\*\.ps1')
 
+    # 8d-2. 🔴 定位 .ps1 必须用 for /f 读 dir 的输出，**不能**用
+    #       `for %%F in ("*.ps1") do ( ... %%~fF ... )` 这种「通配展开进括号块」的写法。
+    #
+    # 为什么（2026-10-11 用户实测复现的真凶之一）：
+    #   cmd 会把 for-in 匹配到的路径**塞进一对括号里**再执行。它给括号配对
+    #   发生在考虑引号**之前**，所以只要展开出来的路径**本身带右括号**，
+    #   这个块就在那个字符处被提前截断，剩下的部分被当成命令执行。
+    #
+    #   触发条件极其常见：浏览器下载同名文件第二次会自动改成
+    #   "cdt-guard-worker-20261011 (1)"，解压后目录里就有 "(1)"。
+    #   此时 for 展开出
+    #       set "PS1=C:\...\cdt-guard-worker-20261011 (1)\cdt-guard-worker\安装.ps1"
+    #   cmd 立即报「此时不应有 \cdt-guard-worker。」并终止整个启动器 ——
+    #   用户看到的就是「双击，窗口一闪就没了」。
+    #
+    #   改成 for /f 读 dir /b 的输出即可绕开：名字是当**一行文本**读进来的，
+    #   不经过括号块，目录名里有什么括号都不影响。已在真实失败目录验证。
+    $usesForF = ($batText -match 'for\s+/f')
+    $usesBadForIn = ($batText -match 'for\s+%%[A-Za-z]\s+in\s*\(\s*"\*\.ps1"')
+    Check "定位 .ps1 用 for /f 读 dir（避开括号陷阱）" $usesForF `
+        "必须用 for /f 读 dir /b 的输出；否则路径含 (1) 时命令块会被右括号截断"
+    Check "没有 for %%F in (*.ps1) 的危险写法" (-not $usesBadForIn) `
+        "该写法在路径含 (1) 时会报「此时不应有 ...」，整个启动器闪退"
+
+    # 8d-3. 🔴 暂停不能用 Read-Host —— 它在 cmd -> powershell -File 链路下不等按键。
+    #
+    # 实测（2026-10-11）：
+    #   同样这条「cmd -> powershell -File」的启动链里，
+    #   Read-Host 返回耗时 0.025 秒（[Console]::IsInputRedirected = True），
+    #   而 cmd 的 pause 会一直阻塞等到按键。
+    #   所以启动器要停住窗口，必须走 cmd 的 pause，不能只靠 Read-Host。
+    Check "启动器暂停不依赖 Read-Host（它在 -File 链路下不等按键）" `
+        ($ps1Text -match 'cmd\.exe\s+/c\s+pause' -or $ps1Text -match 'cmd\s+/c\s+pause') `
+        "Read-Host 在 cmd -> powershell -File 下 0.025 秒就返回，起不到暂停作用；应改用 cmd 的 pause"
+
+    # 8d-4. 启动.bat 退出时要无条件暂停 —— 正常退出（退出码 0）也不能让窗口消失。
+    #
+    # 旧实现只在失败时 pause，于是「用户选 q 正常退出」这条最常见的路径
+    # 会一路走到 exit，窗口瞬间消失。必须无条件 pause。
+    $pauseCount = ([regex]::Matches($batText, '(?m)^\s*pause\s*$')).Count
+    Check "启动.bat 至少有一处无条件 pause" ($pauseCount -ge 1) "无条件 pause 数量：$pauseCount"
+
     # 8e. 🔴 必须自动清除「来自互联网」标记（MOTW / Zone.Identifier）
     #
     # 为什么要有这一条：
@@ -139,8 +185,6 @@ if (Test-Path $batPath) {
     #   （静默失效）；同一句写在 .ps1 里执行则 52 个全部清干净。
     #   所以真正的实现放在 .ps1，.bat 只负责用 -UnblockOnly 调它。
     #   只要「两者合起来」能把整个目录清干净就算通过，不限定写在哪个文件。
-    $ps1Path = Join-Path $scriptDir '安装.ps1'
-    $ps1Text = if (Test-Path $ps1Path) { [System.IO.File]::ReadAllText($ps1Path) } else { '' }
     $unblockInBat = ($batText -match 'Unblock-File')
     $unblockInPs1 = ($ps1Text -match 'Unblock-File')
 

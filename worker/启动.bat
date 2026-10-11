@@ -50,30 +50,59 @@ rem
 rem Instead we pick up the single .ps1 that ships in this folder. Layout is
 rem guaranteed (pack_release.py includes exactly one PowerShell launcher),
 rem and we verify the count so a stray extra .ps1 cannot silently break it.
+rem
+rem CRITICAL - why this uses "for /f" over "dir /b" instead of the obvious
+rem "for %%F in (*.ps1) do (...)"   [root cause found 2026-10-11]
+rem
+rem   A plain FOR-IN over a wildcard expands the matched path INSIDE a
+rem   parenthesised block. cmd pairs the parentheses of that block BEFORE it
+rem   considers quoting, so if the expanded path itself contains a closing
+rem   paren the block is cut short at that character.
+rem
+rem   Repro: unpack anywhere whose path contains "(1)" (browsers append that
+rem   to a second download of the same name), e.g.
+rem       ...\Downloads\cdt-guard (1)\cdt-guard-worker\
+rem   The expanded path is then
+rem       set "PS1=C:\...\cdt-guard (1)\cdt-guard-worker\install.ps1"
+rem   and cmd reports a syntax error about unexpected text after a paren
+rem   (the leftover after the stray paren is treated as a command).
+rem   The launcher dies instantly - the user sees a window flash and vanish.
+rem
+rem   Feeding names in through "for /f ... in ('dir /b')" avoids the trap:
+rem   the value is read as a line of text, never inside a paren block, so a
+rem   paren in the directory name is harmless. Verified on the real failing
+rem   folder.
+rem
+rem   Keep the quoting exactly as below: the nested single quotes and the
+rem   escaped caret are required to run dir from inside for /f.
 rem ---------------------------------------------------------------------------
 set "PS1="
 set "PS1COUNT=0"
-for %%F in ("*.ps1") do (
-    set "PS1=%%~fF"
+for /f "delims=" %%F in ('dir /b /a-d "*.ps1" 2^>nul') do (
+    set "PS1=%~dp0%%F"
     set /a PS1COUNT+=1
 )
 
 if not defined PS1 (
     echo.
     echo [ERROR] No .ps1 launcher found in this folder.
-    echo         Current folder: %CD%
     echo         Please make sure you extracted the WHOLE archive,
     echo         not just this single file.
+    echo.
+    echo         Current folder:
+    echo         !CD!
     echo.
     pause
     exit /b 1
 )
 
-if not "%PS1COUNT%"=="1" (
+if not "!PS1COUNT!"=="1" (
     echo.
-    echo [ERROR] Found %PS1COUNT% .ps1 files in this folder; expected exactly 1.
+    echo [ERROR] Found !PS1COUNT! .ps1 files in this folder; expected exactly 1.
     echo         Please keep only the launcher that came with this package.
-    echo         Files seen: %PS1%
+    echo.
+    echo         Files seen:
+    echo         !PS1!
     echo.
     pause
     exit /b 1
@@ -130,13 +159,31 @@ rem -File        : run our launcher
 
 set "RC=%ERRORLEVEL%"
 
-rem Keep the window open if the launcher failed, so the user can read why.
+rem ---------------------------------------------------------------------------
+rem ALWAYS keep the window open, success or failure.
+rem
+rem WHY (measured 2026-10-11): the launcher used to pause only on failure.
+rem On a normal "user quit the menu" run it exited 0, the .bat fell straight
+rem through to exit, and the console window vanished the instant the menu
+rem closed. Users described that as "double-click, window flashes, gone".
+rem
+rem A second, subtler cause was the launcher's own pause. It used PowerShell's
+rem Read-Host, which returns immediately (0.025s) when stdin is redirected -
+rem which is exactly what happens when cmd runs powershell with -File. So that
+rem pause never actually held the window either.
+rem
+rem Note: comments in a .bat must avoid the gt and pipe characters, because
+rem cmd still treats them as redirection even inside rem. Keep it plain text.
+rem
+rem This pause is cmd's real pause: it blocks and waits for a key. Verified
+rem to block correctly in the same launch chain that silently defeated
+rem Read-Host. Unconditional, so a clean quit is readable too.
+rem ---------------------------------------------------------------------------
+echo.
 if not "%RC%"=="0" (
-    echo.
     echo [INFO] The launcher exited with code %RC%.
     echo        Scroll up to read the messages above.
-    echo.
-    pause
 )
+pause
 
 exit /b %RC%

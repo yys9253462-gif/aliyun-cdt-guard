@@ -76,8 +76,28 @@ function Show-Banner {
 
 function Pause-Exit($code) {
     Write-Host ""
-    Write-Host "  按回车键关闭这个窗口..." -ForegroundColor DarkGray
-    [void](Read-Host)
+    Write-Host "  按任意键关闭这个窗口..." -ForegroundColor DarkGray
+
+    # 🔴 这里绝对不能用 Read-Host 当「暂停」（2026-10-11 实测定位的真凶）。
+    #
+    #    现象：用户双击「启动.bat」，窗口一闪就没了，看不到菜单。
+    #    实测（用 .bat -> powershell -File 的真实调用链）：
+    #      Read-Host 返回耗时 = 0.025 秒，且 [Console]::IsInputRedirected = True。
+    #    也就是说在这种调用链下，标准输入被判定为「已重定向」，
+    #    Read-Host 拿到一个「空的输入流」就立刻返回，**根本不等按键**。
+    #    于是 Pause-Exit 形同虚设 -> 脚本 exit -> 窗口关闭 -> 用户看到「闪退」。
+    #
+    #    对照组：同一个窗口里 cmd 的 `pause` 是**正常阻塞**的
+    #    （实测 .bat 末尾的 pause 会老老实实停住并提示「请按任意键继续」）。
+    #
+    #    所以暂停一律交给 cmd 的 pause；它不可用时再退回 Read-Host。
+    try {
+        # cmd /c pause 会打印「请按任意键继续. . .」并真正等待
+        & cmd.exe /c pause 2>$null | Out-Null
+    } catch {
+        # 极端情况（cmd 不可用 / 被策略拦）才退回旧办法
+        [void](Read-Host)
+    }
     exit $code
 }
 
