@@ -131,6 +131,11 @@ else
   echo "  跳过：当前环境没有 powershell（非 Windows）"
 fi
 
+echo "新增修复回归测试"
+bash tests/test-login.sh || total_fail=$((total_fail + 1))
+for test in tests/test-worker-account.mjs tests/test-bind-chat.mjs tests/test-config-key.mjs; do
+  "$NODE" "$test" || total_fail=$((total_fail + 1))
+done
 echo ""
 if [ "$total_fail" -eq 0 ]; then
   echo "全部自检通过。"

@@ -28,6 +28,20 @@ group() { printf '\n--- %s ---\n' "$1"; }
 ALL_SCRIPTS="menu.sh deploy.sh configure.sh lib-ui.sh lib-preflight.sh"
 
 # ---------------------------------------------------------------------------
+# 离线检查不得访问作者已登录的 Cloudflare 账号。
+TEST_TOOLS="$(mktemp -d)"
+trap 'rm -rf "$TEST_TOOLS"' EXIT
+cat > "$TEST_TOOLS/wrangler" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) echo 'You are not authenticated.'; exit 0 ;;
+  *--version*) echo '4.130.0'; exit 0 ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$TEST_TOOLS/wrangler"
+export PATH="$TEST_TOOLS:$PATH"
+
 group "1. 语法检查（全部 5 个脚本）"
 # ---------------------------------------------------------------------------
 for f in $ALL_SCRIPTS; do
@@ -488,10 +502,10 @@ else
 fi
 
 # E4：menu.sh 探测登录之前，必须先确保配置合法
-if grep -qF 'ensure_config_ready || return 1' menu.sh; then
-  pass "menu.sh 的 is_logged_in 先修配置再探测（避免空 id 误判成未登录）"
+if grep -qF 'cf_is_logged_in' menu.sh; then
+  pass "menu.sh 使用独立认证探测（不依赖 KV 配置）"
 else
-  fail "menu.sh 的 is_logged_in 没有先修配置 —— 空 id 时会把已登录误报成未登录"
+  fail "menu.sh 未使用独立认证探测"
 fi
 
 # E5：探测阶段必须安静（菜单是刷新式的，刷屏会糊掉整个界面）
@@ -589,27 +603,22 @@ else
   pass "deploy.sh 不再重复定义 probe_worker_url（实现只有一份）"
 fi
 
-# F4：🔴 账号名必须从邮箱前缀取，不能从 whoami 抠 *.workers.dev
-#     实测 whoami 的输出里**没有** workers.dev 字样，按它抠只会得到空串，
-#     于是候选只剩 cdt-guard.workers.dev（缺账号前缀）→ 探测必然失败。
-if grep -qF 'cut -d@ -f1' lib-preflight.sh; then
-  pass "账号名从登录邮箱前缀取（实测有效：cdt-guard.<邮箱前缀>.workers.dev）"
+# 当前账号归属回归：不能再用邮箱猜网址或信任旧缓存。
+if grep -qF 'cf_auth_run auth token --json' lib-preflight.sh && grep -qF "get('/accounts')" src/probe-worker.mjs; then
+  pass "Worker 归属通过当前认证账号 API 核对"
 else
-  fail "账号名来源不对 —— 从 whoami 抠 *.workers.dev 会得到空串，探测必失败"
+  fail "Worker 归属未绑定认证账号"
 fi
-
-# F5：必须真的发请求验证（能连上才算数）
-if grep -qF "http_code" lib-preflight.sh; then
-  pass "构造候选后实际访问（能连上才算已部署）"
+if grep -qF '/subdomain' src/probe-worker.mjs; then
+  pass "Worker 真实子域通过 Cloudflare API 查询"
 else
-  fail "没有实际访问 —— 只靠猜名字无法确认云端到底有没有"
+  fail "Worker 子域仍依赖猜测"
 fi
-
-# F6：探测命中要顺手回写 .worker-url（下次走快路径）
-if grep -qF '.worker-url' lib-preflight.sh && grep -qF '> .worker-url' lib-preflight.sh; then
-  pass "探测命中后回写 .worker-url（下次走快路径，不必再发请求）"
+_probe_body="$(awk '/^probe_worker_url\(\)/,/^}/' lib-preflight.sh)"
+if ! printf '%s' "$_probe_body" | grep -qF '.worker-url'; then
+  pass "探测不信任旧账号缓存"
 else
-  fail "探测命中没有回写 —— 每次打开菜单都要重新发网络请求"
+  fail "探测仍信任旧账号缓存"
 fi
 
 # F7：worker_url() 也要复用探测（否则「已部署」却显示不出网址）

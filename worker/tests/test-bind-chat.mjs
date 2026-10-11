@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { bindChat } from '../src/bind-chat.mjs';
+const old = {users:[{instance_id:'i-test',ak:'test',limit_gb:180}],telegram:{chat_id:'11111',other:true},custom:42};
+const result = bindChat(JSON.stringify(old),'22222');
+assert.deepEqual(result.users, old.users);
+assert.equal(result.telegram.chat_id,'22222');
+assert.equal(result.telegram.other,true);
+assert.equal(result.custom,42);
+assert.deepEqual(bindChat('','22222'),{users:[],telegram:{chat_id:'22222'}});
+assert.deepEqual(bindChat('Value not found','22222').users,[]);
+assert.throws(()=>bindChat('network error','22222'));
+assert.throws(()=>bindChat('{broken','22222'));
+assert.throws(()=>bindChat('{}','@user'));
+console.log('PASS: chat ID bound; existing machines and settings preserved; invalid responses rejected');

@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { probeWorker } from '../src/probe-worker.mjs';
+const mock = (values) => async url => {
+  const path = new URL(url).pathname.replace('/client/v4', '');
+  assert.ok(path in values, `unexpected path ${path}`);
+  const v = values[path];
+  return { ok: v.status === undefined || v.status === 200, status: v.status || 200, json: async () => v.body || ({ success: true, result: v }) };
+};
+const base = { '/accounts': [{ id: 'current' }], '/accounts/current/workers/scripts/cdt-guard/subdomain': { enabled: true }, '/accounts/current/workers/subdomain': { subdomain: 'actual-not-email' } };
+assert.equal((await probeWorker('test','cdt-guard','',mock(base))).url,'https://cdt-guard.actual-not-email.workers.dev');
+console.log('PASS: URL comes from current account API, not email or stale cache');
+assert.equal(await probeWorker('test','cdt-guard','',mock({...base, '/accounts/current/workers/scripts/cdt-guard/subdomain': {status:404,body:{success:false,errors:[]}}})),null);
+console.log('PASS: absent Worker stays absent even when old account has a Worker');
+await assert.rejects(probeWorker('test','cdt-guard','old',mock(base)));
+console.log('PASS: inaccessible old account rejected');
+await assert.rejects(probeWorker('test','cdt-guard','',mock({'/accounts':[{id:'a'},{id:'b'}]})));
+console.log('PASS: ambiguous account rejected');
+await assert.rejects(probeWorker('test','cdt-guard','',mock({...base,'/accounts/current/workers/scripts/cdt-guard/subdomain':{status:403,body:{success:false,errors:[]}}})));
+console.log('PASS: permission failure is not undeployed');
+assert.equal((await probeWorker('test','cdt-guard','',mock({...base,'/accounts/current/workers/scripts/cdt-guard/subdomain':{enabled:false}}))).url,'(workers.dev 未启用)');
+console.log('PASS: deployed Worker with disabled route does not reuse stale URL');

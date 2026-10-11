@@ -85,9 +85,7 @@ ensure_config_ready() {
 # 是否已登录 Cloudflare
 is_logged_in() {
   preflight_wrangler 2>/dev/null || return 1
-  # 先让配置合法，否则 whoami 会因「空的 id」而失败，被误判成「没登录」
-  ensure_config_ready || return 1
-  run_wrangler whoami >/dev/null 2>&1
+  cf_is_logged_in
 }
 
 # 当前登录的邮箱（取不到就输出空）
@@ -100,7 +98,7 @@ is_logged_in() {
 #    摘出来变成 "someone@example.com."（尾巴多一个点），很难看。
 logged_in_email() {
   local out=""
-  out="$(run_wrangler whoami 2>/dev/null \
+  out="$(cf_auth_run whoami 2>/dev/null \
     | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' \
     | head -1 || true)"
   printf '%s' "$out"
@@ -266,11 +264,14 @@ show_header() {
     printf "  Cloudflare     ${YELLOW}未登录${RESET}\n"
   fi
 
-  if is_deployed; then
-    printf "  Worker         ${GREEN}已部署${RESET}  %s\n" "$(worker_url)"
-  else
-    printf "  Worker         ${YELLOW}未部署${RESET}\n"
-  fi
+  local verified_url probe_rc
+  verified_url="$(probe_worker_url 2>/dev/null)"
+  probe_rc=$?
+  case "$probe_rc" in
+    0) printf "  Worker         ${GREEN}已部署（当前账号）${RESET}  %s\n" "$verified_url" ;;
+    2) printf "  Worker         ${YELLOW}当前账号未部署${RESET}\n" ;;
+    *) printf "  Worker         ${YELLOW}状态无法确认${RESET}（认证、网络或账号选择异常）\n" ;;
+  esac
 
   if preflight_wrangler && is_logged_in; then
     local stats machines accounts

@@ -36,6 +36,7 @@ cd "$DIR" 2>/dev/null || { echo "无法进入项目目录"; return 1 2>/dev/null
 #    ⚠️ 本文件曾把 ensure_kv_id 定义在自己肚子里，已迁走 —— 别再加回来。
 # shellcheck source=lib-preflight.sh
 . ./lib-preflight.sh
+. ./lib-kv.sh
 
 KV_NAME="CDT_GUARD_KV"
 
@@ -150,75 +151,23 @@ check_env() {
 # ---------------------------------------------------------------------------
 do_login() {
   step "第 2 步 / 登录 Cloudflare 账号"
-
-  # ⚠️⚠️ 这里踩过一个**很隐蔽**的坑（务必看清再改）：
-  #
-  #   交付包里 wrangler.toml 的 KV id 是**故意留空**的（`id = ""`），
-  #   免得把作者的存储 id 泄露给下载的人。
-  #
-  #   但 wrangler 在**任何**命令启动时都会先解析 wrangler.toml。
-  #   id 为空时，连 `wrangler whoami` 都会直接抛错退出：
-  #     X [ERROR] "kv_namespaces[0]" bindings should have a string "id" field
-  #
-  #   后果是一条极难排查的连锁反应：
-  #     1. `whoami` 因为配置错误而失败（不是没登录！）
-  #     2. 脚本看不出来，误判成「没登录」→ 走「打开浏览器登录」分支
-  #     3. `wrangler login` 同样因为配置错误而失败
-  #     4. 用户看到的是「脚本卡住 / 登录失败」，
-  #        完全想不到根因是「配置文件里一个空的 id」
-  #
-  #   实测（2026-10-11）：用户下载后就是这个表现，来问「为什么根本不弹窗」。
-  #
-  #   正确做法：**先判断配置是不是坏的**。如果 KV id 为空，
-  #   就先用一个**不打扰用户**的修复函数把 id 补上
-  #   （优先复用云端已有的同名存储，没有才新建）。
-  if ! grep -qE '^id\s*=\s*"[0-9a-f]{32}"' wrangler.toml; then
-    warn "配置文件里的存储 id 是空的 —— 这会让 wrangler 的所有命令都报错。"
-    printf "     ${DIM}（交付包默认留空，防止泄露作者信息。现在自动帮你补上。）${RESET}\n\n"
-    printf "     正在云端查找是否已有名为「%s」的存储...\n" "$KV_NAME"
-
-    if ! ensure_kv_id; then
-      err "存储 id 没能补上，登录无法继续。"
-      printf "     你可以手动执行：${CYAN}wrangler kv namespace create %s${RESET}\n" "$KV_NAME"
-      printf "     然后把输出里的 id 填进 wrangler.toml 的那一行。\n"
-      return 1
-    fi
-    printf "\n"
-    ok "存储 id 已就绪，现在检查登录状态。"
-    printf "\n"
-  fi
-
-  # ⚠️ 原版检测到「已登录」时只打一行「已经登录过了，跳过。」就往下走。
-  #    问题是菜单里写着「会打开浏览器让你登录」，用户没看到弹窗，
-  #    第一反应就是「脚本坏了 / 卡住了」。
-  #    所以现在**必须把已登录的账号明确打出来**，让用户知道：
-  #      · 弹窗不是没出现，是根本不需要（已经登录过）
-  #      · 登的是哪个账号（避免登错账号还不知道）
-  if wrun whoami >/dev/null 2>&1; then
-    local who
-    who="$(wrun whoami 2>/dev/null)"
-
-    # 从 whoami 输出里尽量抠出邮箱，抠不到也不影响主流程
-    local email
-    email="$(printf '%s' "$who" | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | head -1)"
-
-    printf "\n"
-    ok "检测到你已经登录过 Cloudflare，${BOLD}不需要再弹窗登录${RESET}。"
-    if [ -n "$email" ]; then
-      printf "     当前账号：${CYAN}%s${RESET}\n" "$email"
-    fi
-    printf "     ${DIM}（所以这一步不会打开浏览器，直接往下走 —— 这是正常的）${RESET}\n\n"
-    printf "     如果你想换一个账号登录，请先执行：${CYAN}wrangler logout${RESET}\n"
-    printf "     然后再重新运行本脚本（或选菜单里的「重新部署」）。\n\n"
+  if cf_is_logged_in; then
+    ok "检测到有效的 Cloudflare 登录，跳过重复授权。"
+    cf_auth_run whoami
     return 0
   fi
-
-  printf "接下来浏览器会自动打开，请在弹出的页面里点「允许」。\n"
-  printf "如果浏览器没自动打开，把终端里显示的网址复制到浏览器里打开。\n\n"
-  read -r -p "准备好了就按回车继续..." _
-
-  if ! wrun login; then
-    err "登录失败。可以改用「API 令牌」方式，或把报错发给我。"
+  printf "接下来浏览器会打开，请完成 Cloudflare 授权。\n"
+  printf "如果未自动打开，请复制终端显示的网址到浏览器。\n\n"
+  read -r -p "准备好了就按回车继续..." _ || return 1
+  local help_out
+  help_out="$(cf_auth_run login --help 2>&1 || true)"
+  if printf '%s' "$help_out" | grep -q -- '--device'; then
+    cf_auth_run login --device || { err "登录失败，请保留上方报错。"; return 1; }
+  else
+    cf_auth_run login || { err "登录失败，请保留上方报错。"; return 1; }
+  fi
+  if ! cf_is_logged_in; then
+    err "授权结束，但尚未确认有效登录，请查看上方输出。"
     return 1
   fi
   ok "登录成功。"
@@ -236,11 +185,8 @@ do_create_kv() {
     existing="$(grep -E '^id\s*=\s*"[0-9a-f]{32}"' wrangler.toml | head -1)"
     ok "配置文件里已经填好存储 id 了："
     printf "       %s\n" "$existing"
-    read -r -p "要重新创建吗？(y/N) " answer
-    case "$answer" in
-      [Yy]*) ;;
-      *) ok "保留现有存储，跳过。"; return 0 ;;
-    esac
+    ok "复用现有存储，不重复创建同名 KV。"
+    return 0
   fi
 
   # id 为空 → 复用公共的「补齐」逻辑（先找同名的，没有才建）
@@ -301,6 +247,41 @@ do_create_kv() {
 #   ⚠️ 机器人令牌（TELEGRAM_BOT_TOKEN）是高敏感凭据，**绝不存盘**。
 WEBHOOK_SECRET_VALUE=""
 
+do_bind_chat_id() {
+  local chat_id raw cfg
+  printf "\n请填写你的 Telegram 数字 ID（不是用户名，也不是机器人 ID）。\n"
+  printf "可在 Telegram 中向 @userinfobot 发送 /start 查看你的 ID。\n"
+  while true; do
+    read -r -p "你的数字 ID： " chat_id || return 1
+    chat_id="$(printf '%s' "$chat_id" | tr -d ' \r\n')"
+    printf '%s' "$chat_id" | grep -qE '^[1-9][0-9]{4,}$' && break
+    err "ID 必须为至少 5 位的正整数，请重新填写。"
+  done
+  if ! raw="$(kvx kv key get config --binding CDT_GUARD_KV --text 2>/dev/null)"; then
+    local keys missing
+    keys="$(kvx kv key list --binding CDT_GUARD_KV 2>/dev/null)" || {
+      err "读取存储失败，未覆盖任何机器配置。"; return 1;
+    }
+    missing="$(printf '%s' "$keys" | node src/check-config-key.mjs)" || {
+      err "无法确认原配置是否存在，已停止写入。"; return 1;
+    }
+    if [ "$missing" != "MISSING" ]; then
+      err "原配置存在但读取失败，未覆盖任何机器配置。"; return 1
+    fi
+    raw=""
+    info "这是新存储，尚无配置；将创建初始配置并绑定你的 ID。"
+  fi
+  cfg="$(mktemp "${TMPDIR:-/tmp}/cdt-chat-XXXXXX.json")" || return 1
+  if ! printf '%s' "$raw" | node src/bind-chat.mjs "$chat_id" > "$cfg"; then
+    rm -f "$cfg"; err "原配置无法解析，已停止写入。"; return 1
+  fi
+  if kvx kv key put config --binding CDT_GUARD_KV --path "$cfg"; then
+    rm -f "$cfg"; ok "你的数字 ID 已绑定，已有机器配置保持不变。"
+  else
+    rm -f "$cfg"; err "ID 写入失败。"; return 1
+  fi
+}
+
 do_set_secrets() {
   step "第 4 步 / 写入密钥（只有你能看到）"
 
@@ -313,7 +294,8 @@ do_set_secrets() {
   printf "   按提示起个名字，它就会给你这串令牌。\n"
   local bot_token=""
   while true; do
-    read -r -p "   粘贴机器人令牌（直接回车可跳过）： " bot_token || true
+    read -r -s -p "   粘贴机器人令牌（输入隐藏，直接回车可跳过）： " bot_token || return 1
+    printf "\n"
     [ -z "$bot_token" ] && break
     # 去掉首尾空格 —— 从聊天窗口复制令牌时极易带上空格或换行
     bot_token="$(printf '%s' "$bot_token" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -327,7 +309,7 @@ do_set_secrets() {
     if printf '%s' "$bot_token" | grep -qE '^[0-9]{6,}:[A-Za-z0-9_-]{20,}$'; then
       break
     fi
-    err "这不像一个机器人令牌：「${bot_token}」"
+    err "机器人令牌格式不正确（不显示输入内容）。"
     printf "   正确形态是 ${CYAN}数字:一串字符${RESET}，例如：\n"
     printf "   ${CYAN}1234567890:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx${RESET}\n"
     printf "   常见错误：\n"
@@ -340,8 +322,10 @@ do_set_secrets() {
   if [ -n "$bot_token" ]; then
     if printf "%s" "$bot_token" | wrun secret put TELEGRAM_BOT_TOKEN >/dev/null 2>&1; then
       ok "机器人令牌已写入。"
+      do_bind_chat_id || return 1
     else
       err "机器人令牌写入失败。"
+      return 1
     fi
   else
     warn "跳过了。这会导致机器人收不到消息，稍后必须补上："
@@ -408,7 +392,7 @@ do_deploy() {
     return 1
   fi
 
-  # 从输出里抓网址（deploy 的输出格式是 ...  https://xxx.workers.dev）
+  # 从输出里抓网址（deploy 的输出格式是 ...  https://<你的-worker>.workers.dev）
   local url=""
   url="$(printf '%s\n' "$output" \
     | sed -n 's|.*\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' 2>/dev/null || true)"
@@ -428,7 +412,7 @@ do_deploy() {
 # ---------------------------------------------------------------------------
 # 为什么要有这一步（这是后来的改进）：
 #     原来「自检」是让用户自己在浏览器里打开一串网址。
-#     但那个网址长得像 `https://xxx.workers.dev/setup?key=一长串乱码`，
+#     但那个网址长得像 `https://<你的-worker>.workers.dev/setup?key=一长串乱码`，
 #     用户要么抄错、要么懒得抄，最后这一步等于没做 ——
 #     出了问题也不知道是哪一步坏的。
 #
@@ -444,7 +428,7 @@ do_selfcheck() {
   if ! command -v curl >/dev/null 2>&1; then
     warn "这台电脑没找到 curl，跳过了自动自检。"
     printf "   你可以自己打开浏览器访问自检网址（见最后一段）。\n"
-    return 0
+    return 1
   fi
 
   local worker_url=""
@@ -454,7 +438,7 @@ do_selfcheck() {
     printf "   部署本身是成功的，只是地址没自动认出来。\n"
     printf "   你可以到 Cloudflare 后台（dash.cloudflare.com）→ Workers 里\n"
     printf "   找到名为 cdt-guard 的项目，点进去就能看到它的网址。\n"
-    return 0
+    return 1
   fi
 
   local secret="${WEBHOOK_SECRET_VALUE:-}"
@@ -465,7 +449,7 @@ do_selfcheck() {
   if [ -z "$secret" ]; then
     warn "手上没有网址密钥，跳过了自动自检。"
     printf "   自检网址是：${CYAN}%s/setup?key=你的网址密钥${RESET}\n" "$worker_url"
-    return 0
+    return 1
   fi
 
   # ---- 真正去打这个自检网址 ----
@@ -489,7 +473,7 @@ do_selfcheck() {
     warn "连不上自检网址（多半是网络问题，不是程序坏了）。"
     printf "   你可以稍后自己打开浏览器试试：\n"
     printf "   ${CYAN}%s${RESET}\n" "$url"
-    return 0
+    return 1
   fi
 
   if [ "$http_code" = "403" ]; then
@@ -497,20 +481,20 @@ do_selfcheck() {
     printf "   这说明程序里存的密钥，和你手上这串不一致。\n"
     printf "   最省事的解决办法：重跑一次密钥这一步，然后重新部署：\n"
     printf "     ${CYAN}bash deploy.sh${RESET}\n"
-    return 0
+    return 1
   fi
 
   if [ "$http_code" = "404" ]; then
     err "自检网址不存在（404）——程序可能还是旧版本。"
     printf "   解决办法：重新部署一次：${CYAN}bash deploy.sh${RESET}\n"
-    return 0
+    return 1
   fi
 
   if [ "$http_code" != "200" ]; then
     warn "自检返回了意外状态码：$http_code"
     printf "   把下面这段内容发给我看看：\n\n"
     printf "%s\n" "$body" | head -30
-    return 0
+    return 1
   fi
 
   # ---- 200：把自检内容原样展示给用户 ----
@@ -521,9 +505,10 @@ do_selfcheck() {
 
   # 顺手帮用户判断「到底全好了没有」——
   # 页面里若有「失败 / 错误 / 没通过」这类字眼，就明确提示去看。
-  if printf '%s' "$body" | grep -qE '失败|错误|没通过|未配置|不通'; then
+  if printf '%s' "$body" | grep -qE '^\[失败\]|^\[重要\]|^读取配置失败|^最近一次错误:'; then
     warn "自检里可能有没通过的项目，请对照上面内容看看。"
     printf "   上面标出问题的那一项，照着它的说明处理即可。\n"
+    return 1
   else
     ok "自检全部通过，程序已经跑起来了。"
   fi
@@ -666,8 +651,8 @@ run_full_deploy() {
   save_webhook_secret_locally
 
   do_deploy      || return 1
-  do_selfcheck
   do_configure
+  do_selfcheck || { err "安装尚未完成：Webhook 自检没有通过。请选菜单 7 重试。"; return 1; }
   print_next_steps
 }
 
@@ -734,6 +719,7 @@ main() {
       check_env && ok "只做检查，到此结束。"
       return $?
       ;;
+    bind-chat) do_bind_chat_id ;;
     login)     run_login_only ;;
     deploy|"") run_full_deploy ;;
     redeploy)  run_redeploy_only ;;
