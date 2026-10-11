@@ -35,6 +35,8 @@ cd "$DIR" || { echo "无法进入项目目录"; exit 1; }
 #    同样的提示在不同入口下长得不一样，且不报错。现在统一收进 lib-ui.sh。
 # shellcheck source=lib-ui.sh
 . ./lib-ui.sh
+# shellcheck source=lib-kv.sh
+. ./lib-kv.sh
 
 # ---------------------------------------------------------------------------
 # 载入零件
@@ -141,13 +143,42 @@ is_deployed() {
 }
 
 # 读当前配置里有多少台机器、多少个账号
-# 输出格式："机器数 账号数"（读不到时输出 "0 0"）
+#
+# 输出格式（三态，务必区分开）：
+#   "OK <机器数> <账号数>"  —— 成功读到配置
+#   "EMPTY"                —— 读到了，但里面没有机器（config 不存在 / users 为空）
+#   "ERR"                  —— **读不到**（node 找不到 / wrangler 失败 / 网络不通）
+#
+# 🔴 为什么必须分三态（2026-10-11 用户实测：「我 cloudflare 已经配置了机器了，
+#    菜单却显示还没配机器」）：
+#
+#    旧实现无论哪种失败都只输出 "0 0"，而 show_header 看到 0 就一律显示
+#    「还没配机器」。于是「读取失败」被**伪装成**「你没配」——
+#    用户明明配好了机器，菜单却说他没配，他会以为配置丢了，
+#    反复去点「配置监控机器」重配，越弄越乱。
+#
+#    更糟的是：这个错报**没有任何错误提示**，用户无从判断到底是
+#    「真没配」还是「读不到」。所以现在把失败单独标成 ERR，
+#    状态栏见到 ERR 会直接显示成「读取失败」并提示去查，不再冤枉用户。
 config_stats() {
   local raw=""
-  raw="$(run_wrangler kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
+  # 🔴 必须走 kvx（自动补 --remote），否则在 wrangler 4.x 上会读到
+  #    **本地空存储**，把「云端有配置」误判成「还没配机器」。
+  #    详见 lib-kv.sh 头部说明。
+  #
+  # ⚠️ 这里**不能**用 run_wrangler 兜底 —— 那会漏掉 --remote，
+  #    在 4.x 上又回到「静默读本地空存储」的老毛病。
+  #    兼容层不可用时，宁可报 ERR（提示用户去查），也绝不给出
+  #    「还没配机器」这种会误导人的结论。
+  if declare -F kvx >/dev/null 2>&1; then
+    raw="$(kvx kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
+  else
+    printf 'ERR'
+    return 0
+  fi
   raw="$(printf '%s\n' "$raw" | grep -E '^\{.*\}$' | head -1 || true)"
   if [ -z "$raw" ]; then
-    printf '0 0'
+    printf 'EMPTY'
     return 0
   fi
   # ⚠️ 不要写死 node 路径 —— 换台机器就找不到。动态取。
@@ -168,11 +199,13 @@ config_stats() {
     _lb="$(local_node_bindir 2>/dev/null || true)"
     [ -n "$_lb" ] && [ -x "$_lb/node" ] && node_bin="$_lb/node"
   fi
+  # 读到了 JSON 却连 node 都没有 → 是「读不到」，不是「没配」
   if [ -z "$node_bin" ]; then
-    printf '0 0'
+    printf 'ERR'
     return 0
   fi
-  printf '%s' "$raw" | "$node_bin" -e '
+  local parsed=""
+  parsed="$(printf '%s' "$raw" | "$node_bin" -e '
     let d="";
     process.stdin.on("data",c=>d+=c).on("end",()=>{
       try{
@@ -180,9 +213,17 @@ config_stats() {
         const users=Array.isArray(o.users)?o.users:[];
         const aks=new Set(users.map(u=>String(u.ak||"").trim()).filter(Boolean));
         console.log(users.length+" "+aks.size);
-      }catch(e){ console.log("0 0"); }
+      }catch(e){ console.log("PARSE_FAIL"); }
     });
-  ' 2>/dev/null || printf '0 0'
+  ' 2>/dev/null || true)"
+
+  if [ -z "$parsed" ]; then
+    printf 'ERR'
+  elif [ "$parsed" = "PARSE_FAIL" ]; then
+    printf 'ERR'
+  else
+    printf 'OK %s' "$parsed"
+  fi
 }
 
 # 统一提取 worker 网址
@@ -234,12 +275,32 @@ show_header() {
   if preflight_wrangler && is_logged_in; then
     local stats machines accounts
     stats="$(config_stats)"
-    machines="${stats%% *}"; accounts="${stats##* }"
-    if [ "$machines" -gt 0 ] 2>/dev/null; then
-      printf "  监控配置       ${GREEN}已配 %s 台机器 / %s 个账号${RESET}\n" "$machines" "$accounts"
-    else
-      printf "  监控配置       ${YELLOW}还没配机器${RESET}\n"
-    fi
+    # 🔴 config_stats 是三态输出，必须分开判断（2026-10-11 修）：
+    #    "OK n m" → 读到配置，n 台机器 m 个账号
+    #    "EMPTY"  → 读到了，但确实没有机器（用户还没配，或配置被清空）
+    #    "ERR"    → **读不到**（找不到 node / wrangler 失败 / 网络不通 / KV 编号指错）
+    #
+    #    旧实现把 ERR 也当成「0 台」，于是显示成「还没配机器」——
+    #    用户明明配好了机器却被告知没配（用户实测反馈过这个）。
+    #    现在 ERR 会**明确说出来**，用户才知道要去查，而不是白配一遍。
+    case "$stats" in
+      OK\ *)
+        machines="$(printf '%s' "$stats" | awk '{print $2}')"
+        accounts="$(printf '%s' "$stats" | awk '{print $3}')"
+        if [ "${machines:-0}" -gt 0 ] 2>/dev/null; then
+          printf "  监控配置       ${GREEN}已配 %s 台机器 / %s 个账号${RESET}\n" "$machines" "$accounts"
+        else
+          printf "  监控配置       ${YELLOW}还没配机器${RESET}  ${DIM}（选「3」开始配）${RESET}\n"
+        fi
+        ;;
+      EMPTY)
+        printf "  监控配置       ${YELLOW}还没配机器${RESET}  ${DIM}（选「3」开始配）${RESET}\n"
+        ;;
+      *)
+        # ERR 或其他异常：**绝不**谎报成「还没配机器」
+        printf "  监控配置       ${RED}读取失败${RESET}  ${DIM}（选「0」看排查方法）${RESET}\n"
+        ;;
+    esac
   else
     printf "  监控配置       ${DIM}（登录后可见）${RESET}\n"
   fi

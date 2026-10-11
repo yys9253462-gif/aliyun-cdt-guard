@@ -33,6 +33,7 @@ INCLUDE_FILES = [
     "deploy.sh",
     "configure.sh",
     "lib-ui.sh",
+    "lib-kv.sh",
     "lib-preflight.sh",
     "wrangler.toml",
     "package.json",
@@ -43,7 +44,7 @@ INCLUDE_DIRS = ["src", "tests"]
 # 哪些要可执行
 EXEC_FILES = {
     "menu.sh", "deploy.sh", "configure.sh",
-    "lib-ui.sh", "lib-preflight.sh",
+    "lib-ui.sh", "lib-kv.sh", "lib-preflight.sh",
     "tests/run-all.sh", "tests/test-scripts.sh",
 }
 
@@ -160,9 +161,60 @@ def add_file(tf, full, arcname, exec_names):
     return data
 
 
+def check_sourced_libs():
+    """扫描所有 .sh 里 `source`/`.` 引入的本地库，确认它们都在 INCLUDE_FILES 里。
+
+    🔴 为什么必须做这一步（2026-10-11 踩过的坑）：
+       新增了一个库文件 lib-kv.sh（wrangler 3.x/4.x 的 KV 兼容层），
+       menu.sh / configure.sh / deploy.sh 都会 `source ./lib-kv.sh`，
+       但**忘了把它加进 INCLUDE_FILES** —— 打包时它不会被装进去。
+       后果：用户解压后脚本加载不到这个库，`kvx` 变成未定义命令，
+       于是「监控配置」永远读不到云端数据，又回到
+       「我明明配了机器，菜单却说没配」那个老问题。
+
+       这类「新增文件忘了进清单」的错，靠人记是记不住的，必须让机器查。
+       所以打包前把所有 source 语句扫一遍，跟清单对不上就直接报错终止。
+    """
+    problems = []
+    local_libs = set()
+    pat = re.compile(r'^\s*(?:\.|source)\s+[\'"]?\./([A-Za-z0-9._-]+\.sh)')
+    for root, dirs, files in os.walk(PROJ):
+        dirs[:] = [x for x in dirs
+                   if x not in ("node_modules", ".wrangler", "__pycache__", ".git")]
+        for fn in files:
+            if not fn.endswith(".sh"):
+                continue
+            full = os.path.join(root, fn)
+            try:
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        m = pat.match(line)
+                        if m:
+                            local_libs.add(m.group(1))
+            except OSError:
+                continue
+
+    includes = set(INCLUDE_FILES)
+    for lib in sorted(local_libs):
+        if lib not in includes:
+            problems.append(lib)
+    return problems, sorted(local_libs)
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, NAME)
+
+    # ---- 打包前的硬自检 1：被 source 的库必须都在清单里 ----
+    # 漏一个库 = 用户拿到的手册里少零件，且**运行前毫无征兆**。
+    lib_problems, lib_all = check_sourced_libs()
+    if lib_problems:
+        print("[错误] 以下库文件被脚本 source，但不在 INCLUDE_FILES 里，"
+              "打进去会漏：")
+        for p in lib_problems:
+            print("   -", p)
+        print("   请把它们补进 INCLUDE_FILES（和 EXEC_FILES）后重试。")
+        return 2
 
     missing = []
     buf = io.BytesIO()

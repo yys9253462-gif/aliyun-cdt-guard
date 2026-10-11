@@ -324,6 +324,20 @@ preflight_wrangler() {
     || command -v wrangler >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# KV 远端/本地 兼容层
+# ---------------------------------------------------------------------------
+# 🔴 实现已抽到独立的 lib-kv.sh（menu.sh / configure.sh / deploy.sh 共用一份），
+#    原因见那个文件的头部说明：**wrangler 4.x 把 KV 命令的默认作用域
+#    从云端改成了本地**，不加 `--remote` 就会读到空存储，静默把「已配置」
+#    误判成「还没配」。
+#
+#    这里只是把它引进来，本文件不重复实现。
+if [ -f "./lib-kv.sh" ]; then
+  # shellcheck source=lib-kv.sh
+  . ./lib-kv.sh
+fi
+
 # Node 大版本号（取不到输出空串）
 node_major() {
   local v=""
@@ -667,8 +681,24 @@ PYEOF
   clean="$(printf '%s' "$listed" | sed -n '/^\[/,$p')"
   [ -z "$clean" ] && clean="$listed"
 
-  if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
-    found_id="$(printf '%s' "$clean" | "$_PY" -c "
+  # 🔴 重名 KV 陷阱（2026-10-11 新增，实测定位的隐患）：
+  #
+  #   Cloudflare 的 KV **允许同名**。用户若多次跑过安装（换目录跑、
+  #   重装、或早期手工 create 过），云上会出现**多个** title 相同的
+  #   CDT_GUARD_KV，每个 id 不同、**内容也不同**。
+  #
+  #   旧的取值逻辑是「找到第一个同名就 break」——顺序由云端返回决定，
+  #   **不保证**挑中的是用户真正配过机器的那个。后果极隐蔽：
+  #     · 「Worker 已部署」靠**访问网址**判断 → 正常显示已部署
+  #     · 「监控配置」靠**读 KV** 判断   → 读到空的那个 → 显示「还没配机器」
+  #   用户明明配好了机器，菜单却说没配，且**不报任何错**。
+  #
+  #   修法：把**所有**同名 id 都取出来。若多于一个，优先选**里面真的
+  #   存有 config 数据**的那个；都没有就选第一个，但**明确警告**用户
+  #   存在多个同名存储，避免他默默读到空的那个还以为是配置丢了。
+  local all_ids=""
+  if command -v "$_PY" >/dev/null 2>&1; then
+    all_ids="$(printf '%s' "$clean" | "$_PY" -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -677,12 +707,44 @@ except Exception:
 for item in (data or []):
     if item.get('title') == '$kv_name':
         print(item.get('id', ''))
-        break
 " 2>/dev/null)"
   else
-    found_id="$(printf '%s' "$clean" | tr -d ' \n' \
+    all_ids="$(printf '%s' "$clean" | tr -d ' \n' \
       | grep -oE "\"id\":\"[0-9a-f]{32}\",\"title\":\"$kv_name\"" \
-      | grep -oE '[0-9a-f]{32}' | head -1)"
+      | grep -oE '[0-9a-f]{32}')"
+  fi
+  all_ids="$(printf '%s\n' "$all_ids" | grep -E '^[0-9a-f]{32}$' || true)"
+  local id_count=0
+  [ -n "$all_ids" ] && id_count="$(printf '%s\n' "$all_ids" | wc -l | tr -d ' ')"
+
+  if [ "$id_count" -gt 1 ] 2>/dev/null; then
+    # 多个同名：优先挑「里面确实存着 config」的那个
+    local probe_id probe_hit=""
+    while IFS= read -r probe_id; do
+      [ -n "$probe_id" ] || continue
+      # 走 kv_run（自动补 --remote）：否则 4.x 上读的是本地存储，永远读不到
+      if kv_run "$WC" kv key get config --namespace-id "$probe_id" --text >/dev/null 2>&1; then
+        local _hit
+        _hit="$(kv_run "$WC" kv key get config --namespace-id "$probe_id" --text 2>/dev/null | head -c 40 || true)"
+        case "$_hit" in
+          \{*) probe_hit="$probe_id"; break ;;
+        esac
+      fi
+    done <<EOF
+$all_ids
+EOF
+    if [ -n "$probe_hit" ]; then
+      found_id="$probe_hit"
+      err "发现 $id_count 个同名存储；已自动选用**存有配置数据**的那个：$found_id"
+      err "建议清理多余的同名存储，避免以后又挑错（Cloudflare 后台 → 存储和数据库 → KV）。"
+    else
+      found_id="$(printf '%s\n' "$all_ids" | head -1)"
+      err "发现 $id_count 个同名存储「$kv_name」，但**没有一个**存有配置数据。"
+      err "已暂用第一个：$found_id"
+      err "如果你之前配过机器，配置可能在另一个同名存储里 —— 请到 Cloudflare 后台核对。"
+    fi
+  elif [ -n "$all_ids" ]; then
+    found_id="$(printf '%s\n' "$all_ids" | head -1)"
   fi
 
   if [ -z "$found_id" ]; then
@@ -695,7 +757,7 @@ for item in (data or []):
       return 1
     fi
     found_id="$(printf '%s' "$output" | grep -oE '[0-9a-f]{32}' | head -1)"
-  else
+  elif [ "$id_count" -le 1 ] 2>/dev/null; then
     [ -n "$quiet" ] || ok "找到已有的同名存储，直接复用（不重复创建）：$found_id"
   fi
 

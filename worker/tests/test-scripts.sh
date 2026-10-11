@@ -621,6 +621,158 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo ""
+echo "--- 18. 监控配置状态必须区分「读不到」与「真没配」 ---"
+# 🔴 用户实测反馈（2026-10-11）：
+#    「我 cloudflare 已经配置了机器了，识别不正常」——菜单显示「还没配机器」，
+#    但云端 KV 里 config 明明有 1 台机器。
+#
+#    根因：旧 config_stats 无论哪种失败都只输出 "0 0"，show_header 见到 0
+#    就一律显示「还没配机器」。于是**读取失败被伪装成「你没配」**，
+#    用户会以为配置丢了，反复去重配。
+#
+#    修法：config_stats 改成三态输出 OK/EMPTY/ERR，ERR 单独显示「读取失败」。
+#
+# 这一组是防回归的 —— 谁再把它改回「一路 0 0」，这里必须报红。
+
+# G1：config_stats 必须输出带状态标记的三态之一
+if awk '/^config_stats\(\)/,/^\}/' menu.sh | grep -qE "printf 'OK %s'"; then
+  pass "config_stats 成功时输出 OK 前缀（三态可区分）"
+else
+  fail "config_stats 没有 OK 前缀 —— 又回到「失败伪装成 0 台」的老路"
+fi
+
+# G2：必须有 EMPTY 分支（真没配）
+if awk '/^config_stats\(\)/,/^\}/' menu.sh | grep -qE "printf 'EMPTY'"; then
+  pass "config_stats 有 EMPTY 分支（读到了但确实没机器）"
+else
+  fail "config_stats 缺 EMPTY 分支 —— 无法区分「空配置」与「读取失败」"
+fi
+
+# G3：必须有 ERR 分支（读不到）
+if awk '/^config_stats\(\)/,/^\}/' menu.sh | grep -qE "printf 'ERR'"; then
+  pass "config_stats 有 ERR 分支（读不到时明确报错）"
+else
+  fail "config_stats 缺 ERR 分支 —— 「读不到」会被谎报成「还没配机器」"
+fi
+
+# G4：show_header 必须对 ERR 单独处理，绝不能把 ERR 当 0 台
+if awk '/^show_header\(\)/,/^\}/' menu.sh | grep -qF '读取失败'; then
+  pass "show_header 对 ERR 显示「读取失败」（不谎报没配）"
+else
+  fail "show_header 没有处理 ERR —— 读取失败时又会显示「还没配机器」骗用户"
+fi
+
+# G5：show_header 不得再用「拿 0 0 硬判」的老写法
+if awk '/^show_header\(\)/,/^\}/' menu.sh | grep -qE 'stats%% \*'; then
+  fail "show_header 还在用 old-style 解析（stats%% *）—— ERR/EMPTY 会混淆"
+else
+  pass "show_header 已改用 case 分支解析三态"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- 19. 重名 KV 陷阱：不得盲取第一个同名存储 ---"
+# 🔴 隐患（2026-10-11 排查中发现）：
+#    Cloudflare 允许 KV 同名。用户多次安装后云上可能有多个同 title 的
+#    CDT_GUARD_KV，每个 id 不同、内容也不同。旧的取值逻辑「找到第一个就 break」，
+#    顺序由云端决定 —— 可能挑中空的那个，于是「Worker 已部署」正常
+#    而「监控配置」显示没配。
+#
+#    修法：取出**全部**同名 id；多于一个时优先选「真的存有 config」的那个，
+#    并在挑不中时明确警告用户。
+
+# H1：必须把所有同名 id 都取出来（不再 break 后就完事）
+if awk '/^ensure_kv_id\(\)/,/^}/' lib-preflight.sh | grep -qF 'all_ids'; then
+  pass "ensure_kv_id 收集全部同名 id（all_ids）"
+else
+  fail "ensure_kv_id 仍只取第一个同名 id —— 云端有多个同名时会挑错"
+fi
+
+# H2：必须有重名分支（id_count > 1）
+if awk '/^ensure_kv_id\(\)/,/^}/' lib-preflight.sh | grep -qF 'id_count'; then
+  pass "ensure_kv_id 有重名检测分支（id_count）"
+else
+  fail "ensure_kv_id 没有重名检测 —— 多同名存储场景会静默挑错"
+fi
+
+# H3：重名时必须尝试探测哪个存有 config
+if awk '/^ensure_kv_id\(\)/,/^}/' lib-preflight.sh | grep -qF 'probe_hit'; then
+  pass "重名时优先选「存有配置数据」的那个（probe_hit）"
+else
+  fail "重名时没有内容探测 —— 会挑中空存储，用户以为配置丢了"
+fi
+
+# H4：挑不中时必须明确警告，不能静默
+if awk '/^ensure_kv_id\(\)/,/^}/' lib-preflight.sh | grep -qF '同名存储'; then
+  pass "重名挑不中时给用户明确警告（不会静默）"
+else
+  fail "重名挑不中却静默处理 —— 用户无从知道配置可能读错了"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- 20. wrangler 4.x 兼容层（KV 默认作用域从云端改成了本地） ---"
+# 🔴 真凶（2026-10-11 用户实测：「我 cloudflare 已经配置了机器了，识别不正常」）：
+#    · wrangler 3.x：`kv key get` 默认操作**云端**
+#    · wrangler 4.x：`kv key get` 默认操作**本地模拟存储**；
+#                     要云端必须显式 `--remote`
+#    项目里所有 KV 命令都没写 --remote → 在 4.x 下全部读到本地空存储 →
+#    「Value not found」→ 菜单把「已配置」静默误判成「还没配机器」。
+#
+#    修法：抽出一个兼容层 lib-kv.sh，自动探测当前 wrangler 认不认 --remote。
+#    这一组测试保证这层不会被误删或改坏。
+
+# I1：lib-kv.sh 必须存在
+if [ -f lib-kv.sh ]; then
+  pass "lib-kv.sh 存在（KV 版本兼容层）"
+else
+  fail "lib-kv.sh 不见了 —— 4.x 下会读本地空存储，配置被静默误判成「没配」"
+fi
+
+# I2：必须有 --remote 探测逻辑
+if [ -f lib-kv.sh ] && grep -qF -- '--remote' lib-kv.sh && grep -qF 'kv_remote_flag' lib-kv.sh; then
+  pass "lib-kv.sh 有 --remote 自动探测（kv_remote_flag）"
+else
+  fail "没有 --remote 探测 —— 4.x 读云端数据会静默失败"
+fi
+
+# I3：必须提供统一入口 kv_run / kvx（实现只有一份）
+if [ -f lib-kv.sh ] && grep -qE '^kv_run\(\)' lib-kv.sh && grep -qE '^kvx\(\)' lib-kv.sh; then
+  pass "lib-kv.sh 提供 kv_run / kvx 统一入口"
+else
+  fail "缺少统一入口 —— 各文件自己拼 --remote 迟早改漏"
+fi
+
+# I4：所有 kv key 读写都必须走兼容层，不能裸调 wrangler
+#     （裸调 = 在 4.x 上必然读错存储）
+_naive=$(grep -nE '\b(wrun|run_wrangler|[^ ]*/wrangler) +kv +key +(get|put|delete|list)' \
+           menu.sh configure.sh deploy.sh 2>/dev/null \
+         | grep -v 'kvx kv' | grep -v '^\s*#' | wc -l | tr -d ' ')
+if [ "$_naive" = "0" ]; then
+  pass "menu/configure/deploy 里没有裸调 kv key（都走了兼容层）"
+else
+  fail "仍有 $_naive 处裸调 kv key —— 4.x 上会读到本地空存储"
+fi
+
+# I5：menu.sh 与 configure.sh 都必须引用 lib-kv.sh
+_miss=""
+grep -qF 'lib-kv.sh' menu.sh || _miss="menu.sh"
+grep -qF 'lib-kv.sh' configure.sh || _miss="$_miss configure.sh"
+if [ -z "$_miss" ]; then
+  pass "menu.sh 与 configure.sh 都已引用 lib-kv.sh"
+else
+  fail "未引用 lib-kv.sh：$_miss —— kvx 会是未定义命令"
+fi
+
+# I6：config_stats 必须走兼容层
+if awk '/^config_stats\(\)/,/^\}/' menu.sh | grep -qF 'kvx kv key get'; then
+  pass "config_stats 走 kvx（4.x 下也能读到云端配置）"
+else
+  fail "config_stats 没走兼容层 —— 正是这个函数导致「已配置却显示没配」"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n==========================================\n'
 printf '脚本自检结果: 通过 %d / 失败 %d\n' "$PASS" "$FAIL"
 printf '==========================================\n'

@@ -23,6 +23,8 @@ cd "$DIR" 2>/dev/null || { echo "无法进入项目目录"; exit 1; }
 # 颜色与输出函数：公共库，三个脚本共用同一份（见 lib-ui.sh 里的说明）
 # shellcheck source=lib-ui.sh
 . ./lib-ui.sh
+# shellcheck source=lib-kv.sh
+. ./lib-kv.sh
 
 # 临时文件路径。
 # ⚠️ 不要在这里直接 mktemp —— 那样一来「被引用」时就已经建了个空文件，
@@ -70,21 +72,27 @@ ensure_wrangler() {
 # ---------------------------------------------------------------------------
 # 读取现有配置
 # ---------------------------------------------------------------------------
-# ⚠️ 这里踩过一个版本差异的坑：
-#     wrangler 4.x 需要显式加 `--remote` 才是操作线上数据；
-#     但本机装的常用版本是 3.x，**它不认 --remote 这个参数**，
-#     传了会直接报「未知参数」并打印一大段英文帮助 ——
-#     用户看到的就是「脚本突然刷出一屏英文」。
+# ⚠️ 这里踩过一个版本差异的坑，**且一开始判断错了**（2026-10-11 修正）：
 #
-#     好消息是：3.x 默认就是操作线上，不加正好。
-#     所以这里不加 --remote，两种版本都能跑。
+#     wrangler 4.x 需要显式加 `--remote` 才是操作线上数据；
+#     而 wrangler 3.x **不认 --remote 这个参数**（传了会报「未知参数」）。
+#
+#     ❌ 最初的处理是「干脆都不加，反正 3.x 默认就是线上，两种版本都能跑」。
+#        这是**错的**：4.x 不加 --remote 会去操作**本地模拟存储**，
+#        读线上 config 得到「Value not found」—— **不报错、不崩溃**，
+#        于是把「云端明明配好了机器」静默误判成「还没配过」。
+#        用户看到的就是「我配置过了，菜单却说没配」。
+#
+#     ✅ 现在的处理：统一走 kvx（见 lib-kv.sh），它会自动探测当前 wrangler
+#        认不认 --remote：认（4.x）就补上，不认（3.x）就不加。
+#        两种版本都能正确读写**线上**数据。
 #
 # 另外：配置还没写过时，接口会返回 404。这是**正常情况**，不是错误，
 #      所以要把报错信息丢掉（2>/dev/null），只认「有没有拿到内容」。
 show_current() {
   step "当前配置"
   local raw
-  raw="$(wrun kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
+  raw="$(kvx kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
 
   # 把 wrangler 的各种噪音清掉，只留真正的配置内容。
   # 这些噪音包括：代理提示、版本警告、404 的英文报错、日志路径等。
@@ -627,12 +635,14 @@ run_configure() {
   esac
 
   # ---- 写入 KV ----
-  # ⚠️ 这里踩过版本差异的坑：
-  #     `wrangler kv key put` **不接受管道输入**（echo xxx | wrangler ... 无效）。
-  #     实测 wrangler 3.x 的用法是：kv key put <键> [值]
-  #     值要么当位置参数、要么用 --path 从文件读。
-  #     密码里带引号/空格时位置参数容易被 shell 吃掉，
-  #     所以统一用 --path 走文件，最稳且跨版本通用。
+  # ⚠️ 两处坑，都要避开：
+  #     1) `wrangler kv key put` **不接受管道输入**（echo xxx | wrangler ... 无效）。
+  #        实测用法是：kv key put <键> [值]，值要么当位置参数、
+  #        要么用 --path 从文件读。密码里带引号/空格时位置参数容易被 shell
+  #        吃掉，所以统一用 --path 走文件，最稳且跨版本通用。
+  #     2) **必须走 kvx**（见 lib-kv.sh）：wrangler 4.x 不加 `--remote`
+  #        会把配置写到**本地模拟存储**，看起来「写入成功」，
+  #        但线上其实没变 —— 用户下次读又读不到，白配一场。
   step "写入配置"
   local cfg_file=".config-payload.json"
   printf '%s' "$full_json" > "$cfg_file"
@@ -645,7 +655,7 @@ run_configure() {
     return 0
   fi
 
-  if wrun kv key put config --binding CDT_GUARD_KV --path "$cfg_file" >/dev/null 2>&1; then
+  if kvx kv key put config --binding CDT_GUARD_KV --path "$cfg_file" >/dev/null 2>&1; then
     ok "配置已写入。"
     rm -f "$cfg_file"
   else
@@ -694,7 +704,9 @@ run_add_account() {
   fi
 
   local raw=""
-  raw="$(wrun kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
+  # 走 kvx：wrangler 4.x 不加 --remote 会读本地空存储，导致
+  #「添加账号」时看不到已有机器，误把用户的配置覆盖掉。
+  raw="$(kvx kv key get config --binding CDT_GUARD_KV --text 2>/dev/null || true)"
   raw="$(printf '%s\n' "$raw" | grep -E '^\{.*\}$' | head -1 || true)"
 
   local existing_users="[]"
@@ -852,7 +864,7 @@ run_add_account() {
     return 0
   fi
 
-  if wrun kv key put config --binding CDT_GUARD_KV --path "$cfg_file" >/dev/null 2>&1; then
+  if kvx kv key put config --binding CDT_GUARD_KV --path "$cfg_file" >/dev/null 2>&1; then
     rm -f "$cfg_file"
     rm -f "$TEMP_JSON"
     ok "新账号已添加，共新增 $added 台机器。"
