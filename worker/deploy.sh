@@ -135,14 +135,233 @@ check_env() {
 }
 
 # ---------------------------------------------------------------------------
+# 工具函数：把 KV 存储 id 补齐（无交互，可被多处复用）
+# ---------------------------------------------------------------------------
+# 🔴 这里踩过一个**很隐蔽的死锁坑**（务必看清再改，否则整个方案会失效）：
+#
+#   wrangler.toml 里 `id = ""` 时，**wrangler 的任何命令都会先解析配置再报错**，
+#   连 `whoami`、`kv namespace list` 都不例外。实测报错就是：
+#     X [ERROR] Processing wrangler.toml configuration:
+#       - "kv_namespaces[0]" bindings should have a string "id" field but got
+#         {"binding":"CDT_GUARD_KV","id":""}
+#
+#   → 所以「用 `kv namespace list` 去云端找 id」这个念头本身是**死锁**的：
+#     要 list 就得先有个合法配置，而配置合法又正是我们要解决的事。
+#     第一版就是栽在这 —— list 失败后输出为空，被程序误判成
+#     「云端没有同名存储」，于是去新建，然后新建也失败，全线崩。
+#
+#   正确解法：**查之前，先把 [[kv_namespaces]] 整段临时注释掉**，
+#   让 wrangler 能正常启动 → list 拿到真实数据 → 再写回 → 最后恢复结构。
+#   （已验证：注释掉那 3 行后，`kv namespace list` 立刻正常返回。）
+#
+# 策略（顺序很重要）：
+#   1. 备份 wrangler.toml
+#   2. 临时注释掉 [[kv_namespaces]] 那 3 行，让 wrangler 可用
+#   3. `kv namespace list`：
+#        · 有同名存储 → 复用它的 id（不重复创建）
+#        · 没有       → 新建一个，拿到 id
+#      ⚠️ list 本身失败（网络/未登录等）与「真的没有」必须区分开，
+#         否则会误去新建 —— 见下面的 rc 判断。
+#   4. 把 id 写回 wrangler.toml，恢复正常结构
+#   5. 任何一步失败 → 用备份整体还原，不留半截文件
+#
+# 返回：0 = 已就绪；非 0 = 没搞定（调用方负责给出中文指引）
+ensure_kv_id() {
+  local cfg="wrangler.toml"
+  local backup="${cfg}.bak-$(date +%Y%m%d%H%M%S)"
+
+  # 1) 备份
+  cp "$cfg" "$backup" || { err "无法备份配置文件，已中止。"; return 1; }
+
+  # 2) 临时注释掉 [[kv_namespaces]] 段的 3 行，让 wrangler 能启动
+  #    用 python 做，避免 sed 在不同平台的转义差异；失败则还原。
+  local tmpcfg="${cfg}.tmp-$$"
+  local _PY
+  if command -v python3 >/dev/null 2>&1; then _PY=python3; else _PY=python; fi
+  if ! "$_PY" - "$cfg" "$tmpcfg" <<'PYEOF'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src, encoding="utf-8").read()
+# ⚠️ 必须用标准的 TOML 注释符 `#` 前缀！
+#    踩坑记录：最初写的是自定义前缀 `_CDTGUARD_OFF_`，结果 wrangler 解析报
+#      X [ERROR] Invalid character, expected "="
+#      C:\...\wrangler.toml:40:5:  _CDTGUARD_OFF_ [[kv_namespaces]]
+#    TOML 只认 `#` 开头为注释，前缀一改就是一个语法错误。
+s = re.sub(r'^\[\[kv_namespaces\]\]', r'# CDT_GUARD_OFF [[kv_namespaces]]', s, flags=re.M)
+s = re.sub(r'^binding\s*=\s*"CDT_GUARD_KV"', r'# CDT_GUARD_OFF binding = "CDT_GUARD_KV"', s, flags=re.M)
+s = re.sub(r'^id\s*=\s*""', r'# CDT_GUARD_OFF id = ""', s, flags=re.M)
+open(dst, "w", encoding="utf-8").write(s)
+PYEOF
+  then
+    err "临时改写配置文件失败，已中止。"
+    rm -f "$tmpcfg"
+    rm -f "$backup"
+    return 1
+  fi
+  cp "$tmpcfg" "$cfg" 2>/dev/null || { mv -f "$tmpcfg" "$cfg" 2>/dev/null || cp "$tmpcfg" "$cfg"; }
+  rm -f "$tmpcfg"
+
+  # 3) 现在 wrangler 可用了，去云端查同名存储
+  local listed rc found_id="" clean=""
+  listed="$(wrun kv namespace list 2>/dev/null)"
+  rc=$?
+
+  if [ $rc -ne 0 ] || [ -z "$listed" ]; then
+    # ⚠️ 这一步特意与「没有同名存储」区分开：这多半是没登录 / 网络不通，
+    #    绝不能再往下走「新建」，否则会误报成「新建失败」把用户带偏。
+    err "查询云端存储列表失败（可能是还没登录，或网络不通）。"
+    cp "$backup" "$cfg"
+    rm -f "$backup"
+    return 1
+  fi
+
+  # 🔴 关键一步：wrangler 会把警告（如「检测到代理环境变量」）**打到标准输出**，
+  #    它和 JSON 混在一起会让解析器直接失败 —— 于是「解析失败」被误当成
+  #    「云端没有同名存储」，脚本就会去新建一个重复的空间。
+  #    实测就是栽在这：明明线上已有 CDT_GUARD_KV，却被判成「没有」。
+  #    修法：只取从第一个 `[` 开始的内容，把前面的杂质行全部丢掉。
+  clean="$(printf '%s' "$listed" | sed -n '/^\[/,$p')"
+  [ -z "$clean" ] && clean="$listed"
+
+  # 从 JSON 里找 title == KV_NAME 的那条的 id；优先 python，退化正则。
+  if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+    found_id="$(printf '%s' "$clean" | "$_PY" -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in (data or []):
+    if item.get('title') == '$KV_NAME':
+        print(item.get('id', ''))
+        break
+" 2>/dev/null)"
+  else
+    found_id="$(printf '%s' "$clean" | tr -d ' \n' \
+      | grep -oE "\"id\":\"[0-9a-f]{32}\",\"title\":\"$KV_NAME\"" \
+      | grep -oE '[0-9a-f]{32}' | head -1)"
+  fi
+
+  if [ -z "$found_id" ]; then
+    printf "     云端没有同名存储，新建一个...\n"
+    local output
+    if ! output="$(wrun kv namespace create "$KV_NAME" 2>&1)"; then
+      printf "%s\n" "$output"
+      err "新建存储失败，已还原配置文件。"
+      cp "$backup" "$cfg"
+      rm -f "$backup"
+      return 1
+    fi
+    found_id="$(printf '%s' "$output" | grep -oE '[0-9a-f]{32}' | head -1)"
+  else
+    ok "找到已有的同名存储，直接复用（不重复创建）：$found_id"
+  fi
+
+  if [ -z "$found_id" ]; then
+    err "没有拿到存储 id，已还原配置文件。"
+    cp "$backup" "$cfg"
+    rm -f "$backup"
+    return 1
+  fi
+
+  # 4) 从备份恢复结构，再把真实 id 填进去
+  #
+  # ⚠️ 这里**故意不用 sed** —— 踩过坑：
+  #    交付包里的 wrangler.toml 是 **CRLF（Windows 行尾）**，而 Git Bash 的
+  #    `sed -i` 会把 `\r` 当普通字符吃掉，结果是**整个文件 68 行行尾全变成 LF**。
+  #    TOML 语义虽然不变，但等于把人家原文件格式改了一遍，属于不该有的副作用。
+  #    改用 python：**只替换 id 那一行的值**，其余字节原样保留，行尾不受影响。
+  cp "$backup" "$cfg" || return 1
+  if "$_PY" - "$cfg" "$found_id" <<'PYEOF'
+import re, sys
+path, new_id = sys.argv[1], sys.argv[2]
+with open(path, "rb") as fh:
+    raw = fh.read()
+text = raw.decode("utf-8")
+# 只动 id 行的值，保留其行尾（\r\n 或 \n 都不碰）
+new_text, n = re.subn(r'^(id\s*=\s*)"[^"]*"', lambda m: m.group(1) + '"' + new_id + '"',
+                      text, count=1, flags=re.M)
+if n == 0:
+    sys.exit(1)
+with open(path, "wb") as fh:
+    fh.write(new_text.encode("utf-8"))
+PYEOF
+  then
+    ok "存储 id 已写入配置文件：$found_id"
+    printf "       ${DIM}（改动前的备份：%s）${RESET}\n" "$backup"
+    return 0
+  fi
+  err "写配置文件失败，已从备份恢复。"
+  cp "$backup" "$cfg"
+  rm -f "$backup"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # 第 2 步：登录 Cloudflare
 # ---------------------------------------------------------------------------
 do_login() {
   step "第 2 步 / 登录 Cloudflare 账号"
 
+  # ⚠️⚠️ 这里踩过一个**很隐蔽**的坑（务必看清再改）：
+  #
+  #   交付包里 wrangler.toml 的 KV id 是**故意留空**的（`id = ""`），
+  #   免得把作者的存储 id 泄露给下载的人。
+  #
+  #   但 wrangler 在**任何**命令启动时都会先解析 wrangler.toml。
+  #   id 为空时，连 `wrangler whoami` 都会直接抛错退出：
+  #     X [ERROR] "kv_namespaces[0]" bindings should have a string "id" field
+  #
+  #   后果是一条极难排查的连锁反应：
+  #     1. `whoami` 因为配置错误而失败（不是没登录！）
+  #     2. 脚本看不出来，误判成「没登录」→ 走「打开浏览器登录」分支
+  #     3. `wrangler login` 同样因为配置错误而失败
+  #     4. 用户看到的是「脚本卡住 / 登录失败」，
+  #        完全想不到根因是「配置文件里一个空的 id」
+  #
+  #   实测（2026-10-11）：用户下载后就是这个表现，来问「为什么根本不弹窗」。
+  #
+  #   正确做法：**先判断配置是不是坏的**。如果 KV id 为空，
+  #   就先用一个**不打扰用户**的修复函数把 id 补上
+  #   （优先复用云端已有的同名存储，没有才新建）。
+  if ! grep -qE '^id\s*=\s*"[0-9a-f]{32}"' wrangler.toml; then
+    warn "配置文件里的存储 id 是空的 —— 这会让 wrangler 的所有命令都报错。"
+    printf "     ${DIM}（交付包默认留空，防止泄露作者信息。现在自动帮你补上。）${RESET}\n\n"
+    printf "     正在云端查找是否已有名为「%s」的存储...\n" "$KV_NAME"
+
+    if ! ensure_kv_id; then
+      err "存储 id 没能补上，登录无法继续。"
+      printf "     你可以手动执行：${CYAN}wrangler kv namespace create %s${RESET}\n" "$KV_NAME"
+      printf "     然后把输出里的 id 填进 wrangler.toml 的那一行。\n"
+      return 1
+    fi
+    printf "\n"
+    ok "存储 id 已就绪，现在检查登录状态。"
+    printf "\n"
+  fi
+
+  # ⚠️ 原版检测到「已登录」时只打一行「已经登录过了，跳过。」就往下走。
+  #    问题是菜单里写着「会打开浏览器让你登录」，用户没看到弹窗，
+  #    第一反应就是「脚本坏了 / 卡住了」。
+  #    所以现在**必须把已登录的账号明确打出来**，让用户知道：
+  #      · 弹窗不是没出现，是根本不需要（已经登录过）
+  #      · 登的是哪个账号（避免登错账号还不知道）
   if wrun whoami >/dev/null 2>&1; then
-    ok "已经登录过了，跳过。"
-    wrun whoami 2>/dev/null | head -20
+    local who
+    who="$(wrun whoami 2>/dev/null)"
+
+    # 从 whoami 输出里尽量抠出邮箱，抠不到也不影响主流程
+    local email
+    email="$(printf '%s' "$who" | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | head -1)"
+
+    printf "\n"
+    ok "检测到你已经登录过 Cloudflare，${BOLD}不需要再弹窗登录${RESET}。"
+    if [ -n "$email" ]; then
+      printf "     当前账号：${CYAN}%s${RESET}\n" "$email"
+    fi
+    printf "     ${DIM}（所以这一步不会打开浏览器，直接往下走 —— 这是正常的）${RESET}\n\n"
+    printf "     如果你想换一个账号登录，请先执行：${CYAN}wrangler logout${RESET}\n"
+    printf "     然后再重新运行本脚本（或选菜单里的「重新部署」）。\n\n"
     return 0
   fi
 
@@ -174,6 +393,18 @@ do_create_kv() {
       [Yy]*) ;;
       *) ok "保留现有存储，跳过。"; return 0 ;;
     esac
+  fi
+
+  # id 为空 → 复用公共的「补齐」逻辑（先找同名的，没有才建）
+  if ! grep -qE '^id\s*=\s*"[0-9a-f]{32}"' wrangler.toml; then
+    warn "配置文件里的存储 id 是空的（交付包默认如此，属正常）。"
+    printf "     正在云端查找是否已有名为「%s」的存储...\n" "$KV_NAME"
+
+    if ensure_kv_id; then
+      return 0
+    fi
+    err "存储没能就绪。"
+    return 1
   fi
 
   printf "正在创建存储空间「%s」...\n" "$KV_NAME"
@@ -299,6 +530,24 @@ do_set_secrets() {
 # 也方便你以后忘了随时 `cat .worker-url` 查。
 do_deploy() {
   step "第 5 步 / 上传部署"
+
+  # ⚠️ 部署前的守卫（别删）：
+  #    如果 KV id 还是空的，wrangler 会抛一条**英文**报错：
+  #      X [ERROR] "kv_namespaces[0]" bindings should have a string "id" field
+  #    用户看不懂，只会以为「包坏了」。
+  #    这里提前拦下，用中文说清「该怎么办」——
+  #    真正的原因几乎总是「跳过了第 3 步（创建存储）」。
+  if ! grep -qE '^id\s*=\s*"[0-9a-f]{32}"' wrangler.toml; then
+    err "配置文件里的存储 id 还是空的，现在部署一定失败。"
+    printf "\n"
+    printf "   原因：这一版交付包的 wrangler.toml 里，存储 id 是**故意留空**的，\n"
+    printf "         需要先创建（或找回）一个存储空间，把 id 填进去。\n\n"
+    printf "   怎么办（二选一）：\n"
+    printf "     ${CYAN}·${RESET} 回到菜单选 ${BOLD}2) 一站式安装${RESET}，它会自动建好并填上；\n"
+    printf "     ${CYAN}·${RESET} 或执行 ${CYAN}wrangler kv namespace create %s${RESET}，\n" "$KV_NAME"
+    printf "       再把输出里的 id 填进 wrangler.toml 的那一行。\n\n"
+    return 1
+  fi
 
   local output=""
   local code=0

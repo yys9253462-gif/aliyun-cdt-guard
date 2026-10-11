@@ -211,7 +211,7 @@ menu_full_install() {
   step "一站式安装"
   printf "这一步会做这些事：\n"
   printf "  · 检查环境（缺 Node 会告诉你怎么装）\n"
-  printf "  · 打开浏览器让你登录 Cloudflare\n"
+  printf "  · 检查 Cloudflare 登录（已登录就直接用，没登录才开浏览器）\n"
   printf "  · 创建存储空间、写入密钥\n"
   printf "  · 上传程序、自动自检\n"
   printf "  · 接着问你「要监控哪几台机器」\n\n"
