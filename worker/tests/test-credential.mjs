@@ -134,7 +134,7 @@ function baseConfig() {
     users: [
       {
         name: '菲律宾节点',
-        instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+        instance_id: 'i-faketest0000stsujw0r',
         region: 'ap-southeast-6',
         ak: FAKE_AK,
         sk: FAKE_SK,

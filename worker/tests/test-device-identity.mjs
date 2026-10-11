@@ -107,7 +107,7 @@ console.log('\n【第四组】🔴 对照：证明「按名字匹配」确实会
 console.log('\n【第五组】ID 尾段工具函数');
 {
   check('短 ID 原样返回', L.shortIdTail('i-abc') === 'i-abc');
-  check('长 ID 取末 8 位', L.shortIdTail('i-5ts7fo7n0ui3stsujw0r') === 'stsujw0r');
+  check('长 ID 取末 8 位', L.shortIdTail('i-faketest0000stsujw0r') === 'stsujw0r');
   check('空值安全', L.shortIdTail('') === '' && L.shortIdTail(null) === '');
   check('末 8 位长度恒定', L.shortIdTail('i-1234567890abcdef').length === L.DEVICE_ID_TAIL);
 }

@@ -206,7 +206,7 @@ process.stdin.on("end", () => {
 # 返回 0 = 格式正确；返回 1 = 格式不对（并已打印原因）
 check_instance_id() {
   local v="$1"
-  # 阿里云实例 ID 形如 i-5ts7fo7n0ui3stsujw0r：
+  # 阿里云实例 ID 形如 i-faketest0000stsujw0r：
   # 必须以 i- 开头，后面只跟小写字母和数字，长度 10 位以上。
   case "$v" in
     i-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z]*)
@@ -218,7 +218,7 @@ check_instance_id() {
   esac
   err "实例 ID 格式不对：「${v}」"
   printf "   正确格式是以 ${CYAN}i-${RESET} 开头、后面跟一串小写字母和数字，\n"
-  printf "   例如：${CYAN}i-5ts7fo7n0ui3stsujw0r${RESET}\n"
+  printf "   例如：${CYAN}i-faketest0000stsujw0r${RESET}\n"
   printf "   在阿里云控制台「实例列表」里，点进机器就能复制到这一串。\n"
   return 1
 }
@@ -314,7 +314,7 @@ ask_one_machine() {
   [ -z "$name" ] && { warn "名字不能为空，跳过这台。"; return 1; }
 
   printf "② 实例 ID。在阿里云控制台实例列表里能找到，以 i- 开头，\n"
-  printf "   比如 i-5ts7fo7n0ui3stsujw0r\n"
+  printf "   比如 i-faketest0000stsujw0r\n"
   ask_validated "   实例 ID： " check_instance_id || return 1
   local instance_id="$_INPUT_VALUE"
 
@@ -392,7 +392,7 @@ ask_one_machine() {
 # 用一个账号的凭据，列出它下面有哪些机器
 # ---------------------------------------------------------------------------
 # 为什么要这个：让用户从列表里「认」机器，而不是去控制台手抄实例 ID。
-#   手抄那串 i-5ts7fo7n0ui3stsujw0r 极度容易抄错，且抄错了不会立刻报错
+#   手抄那串 i-faketest0000stsujw0r 极度容易抄错，且抄错了不会立刻报错
 #   （表现为「查不到数据」），排查起来很痛苦。
 #
 # 实现说明：这里直接调阿里云 API，签名逻辑与 Worker 里那份**必须一致**，

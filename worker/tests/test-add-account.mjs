@@ -312,9 +312,9 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
   await common.saveConfig(env, {
     telegram: { chat_id: CHAT, admin_ids: [CHAT] },
     users: [
-      // 用户原来配的：旧密钥，机器 i-5ts7fo7n0ui3stsujw0r
+      // 用户原来配的：旧密钥，机器 i-faketest0000stsujw0r
       {
-        name: '菲律宾节点', instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+        name: '菲律宾节点', instance_id: 'i-faketest0000stsujw0r',
         region: 'ap-southeast-6', ak: 'LTAI5tOLDdeleted000000',
         sk: 'OLDsecretWhichWasDeleted00000000',
         traffic_limit: 180, paused: false,
@@ -328,7 +328,7 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
     ak: 'LTAI5tBRANDnewkey111111',
     sk: 'BRANDnewSecretValue0000000000000',
     instances: [
-      { instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: 'launch-advisor-20261010', region: 'ap-southeast-6', status: 'Running', isOverseas: true },
+      { instanceId: 'i-faketest0000stsujw0r', instanceName: 'launch-advisor-20261010', region: 'ap-southeast-6', status: 'Running', isOverseas: true },
     ],
   });
 
@@ -336,7 +336,7 @@ console.log('--- 6. 配置合并：只追加、绝不动已有机器（最关键
   await addAccount.confirmAddAccount(env, TOKEN, CHAT, w);
 
   const cfg = await common.loadConfig(env);
-  const m = cfg.users.find((u) => u.instance_id === 'i-5ts7fo7n0ui3stsujw0r');
+  const m = cfg.users.find((u) => u.instance_id === 'i-faketest0000stsujw0r');
 
   check('换密钥后 AK 已更新（不再是失效的旧 AK）',
     m?.ak === 'LTAI5tBRANDnewkey111111', `实际 ${m?.ak}`);
@@ -566,8 +566,8 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
   const AK = 'LTAI5tTestKeyFakeValue0';
 
   // 14a. 三段式：中文地域名 - 账号标识 - 尾号
-  //      注意 i-5ts7fo7n0ui3stsujw0r 的最后 6 位是 **sujw0r**（不是 3stsujw0r）
-  const n1 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', AK);
+  //      注意 i-faketest0000stsujw0r 的最后 6 位是 **sujw0r**（不是 3stsujw0r）
+  const n1 = await nameOf('ap-southeast-6', 'i-faketest0000stsujw0r', AK);
   console.log(`    ap-southeast-6 无名机器 → 「${n1}」`);
   check('用中文地域名而不是代码', n1.includes('马尼拉') && !n1.includes('ap-southeast-6'), n1);
   check('尾巴带上了账号标识（打码 AK 前 6 位）', n1.includes('LTAI5t'), n1);
@@ -577,7 +577,7 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
   check('三段用短横线连接', n1.split('-').length === 3, n1);
 
   // 14b. 同地域、**不同账号** → 名字必须能区分开（这正是老大要的效果）
-  const n2 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', 'LTAI5tOtherAccount9999');
+  const n2 = await nameOf('ap-southeast-6', 'i-faketest0000stsujw0r', 'LTAI5tOtherAccount9999');
   console.log(`    同地域换账号 → 「${n2}」`);
   // ⚠️ 这里刻意**不**断言 n1 !== n2：两个假 AK 的「前 6 位」本来就是同一个 LTAI5t，
   //    按设计它们会得到同样的账号标识。真正能区分账号的是「账号汇总」里的
@@ -586,12 +586,12 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
     n1 === n2, `${n1} vs ${n2}`);
 
   // 14b2. ⭐ 真正要保证的是：**不同前 6 位**的账号一定区分得开
-  const n2b = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', 'LTAI9xAnotherAcc000000');
+  const n2b = await nameOf('ap-southeast-6', 'i-faketest0000stsujw0r', 'LTAI9xAnotherAcc000000');
   console.log(`    换一个前缀不同的账号 → 「${n2b}」`);
   check('前缀不同的账号，机器名能区分', n2b.includes('LTAI9x') && n2b !== n1, n2b);
 
   // 14c. 同账号、**同地域**、不同机器 → 靠尾号区分
-  const n3 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3zzzzzzz', AK);
+  const n3 = await nameOf('ap-southeast-6', 'i-faketest0000zzzzzz', AK);
   console.log(`    同地域同账号另一台 → 「${n3}」`);
   check('同账号同地域靠尾号区分', n3 !== n1, `${n3} vs ${n1}`);
   check('尾号确实是新机器的尾号（zzzzzz）', n3.endsWith('zzzzzz'), n3);
@@ -616,7 +616,7 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
     await common.saveConfig(env, {
       telegram: { chat_id: chat },
       users: [{
-        name: '菲律宾节点', instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+        name: '菲律宾节点', instance_id: 'i-faketest0000stsujw0r',
         region: 'ap-southeast-6', ak: 'LTAI5tOLDdeleted000000',
         sk: 'OLDsecretWhichWasDeleted00000000', traffic_limit: 180, paused: false,
       }],
@@ -624,7 +624,7 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
     await common.setWizard(env, chat, {
       step: addAccount.STEP_CONFIRM,
       ak: AK, sk: 'fakeSecretForTesting0000000000',
-      instances: [{ instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: '', region: 'ap-southeast-6', status: 'Running' }],
+      instances: [{ instanceId: 'i-faketest0000stsujw0r', instanceName: '', region: 'ap-southeast-6', status: 'Running' }],
     });
     const w = await common.getWizard(env, chat);
     await addAccount.confirmAddAccount(env, TOKEN, chat, w);
@@ -635,7 +635,7 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
 
   // 14g. 阿里云上用户自己起了名字 → 必须原样用，不能套我们的三段式
   {
-    const n6 = await nameOf('ap-southeast-6', 'i-5ts7fo7n0ui3stsujw0r', AK).then(async () => {
+    const n6 = await nameOf('ap-southeast-6', 'i-faketest0000stsujw0r', AK).then(async () => {
       const env = freshEnv();
       installFakeFetch();
       const chat = 'named-by-user-001';
@@ -643,7 +643,7 @@ console.log('--- 14. 无名机器的自动命名：中文地域 + 账号标识 +
         step: addAccount.STEP_CONFIRM,
         ak: AK, sk: 'fakeSecretForTesting0000000000',
         instances: [{
-          instanceId: 'i-5ts7fo7n0ui3stsujw0r', instanceName: '我的生产机',
+          instanceId: 'i-faketest0000stsujw0r', instanceName: '我的生产机',
           region: 'ap-southeast-6', status: 'Running',
         }],
       });

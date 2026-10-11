@@ -192,7 +192,7 @@ check('暂停实例按钮可反查', L.parseDeviceButton(btnPaused)?.name === '�
   JSON.stringify(L.parseDeviceButton(btnPaused)));
 
 // 带实例 ID 的按钮必须能取出尾号（这是「不删错机器」的关键信息）
-const btnWithId = L.buildDeviceButton('某台机器', false, 'i-5ts7fo7n0ui3stsujw0r');
+const btnWithId = L.buildDeviceButton('某台机器', false, 'i-faketest0000stsujw0r');
 check('带实例ID的按钮可取出尾号', L.parseDeviceButton(btnWithId)?.idTail === 'stsujw0r',
   JSON.stringify(L.parseDeviceButton(btnWithId)));
 
@@ -513,7 +513,7 @@ console.log('--- 11. 🔴 KV 写入失败（额度用尽）不能让巡检崩溃
   // 12.3 反向：绝不能误伤正常运维文本
   const noHarm = [
     '查询实例状态 失败：Invalid parameter: InstanceId',
-    '机器 i-5ts7fo7n0ui3stsujw0r 已关机',
+    '机器 i-faketest0000stsujw0r 已关机',
     '当前流量 12.34GB，本月免费额度 200GB',
     '开机指令下发失败：Forbidden.RAM 权限不足',
     '实例 my_server_01 巡检正常',

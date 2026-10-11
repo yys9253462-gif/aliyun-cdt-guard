@@ -111,7 +111,7 @@ console.log(`  超长名按钮: ${JSON.stringify(btn3)} \u2192 反查 ${JSON.str
 check('超长名反查是原名的前缀', back3 && '美东备用服务器边节点'.startsWith(back3.name), JSON.stringify(back3));
 
 // ---- 带实例 ID 尾段：这是「不删错机器」的关键 ----
-const btnId = M.buildDeviceButton('香港-生产环境-新加坡中转节点-AAAA', false, 'i-5ts7fo7n0ui3stsujw0r');
+const btnId = M.buildDeviceButton('香港-生产环境-新加坡中转节点-AAAA', false, 'i-faketest0000stsujw0r');
 console.log(`  带实例ID按钮: ${JSON.stringify(btnId)}`);
 const backId = M.parseDeviceButton(btnId);
 check('按钮里带上了实例 ID 尾段', backId && backId.idTail === 'stsujw0r', JSON.stringify(backId));

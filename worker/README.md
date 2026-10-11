@@ -278,7 +278,7 @@ bash menu.sh status        # 只看当前状态
 
 | 名称 | 实例 ID | 地域 | 阈值 |
 |---|---|---|---|
-| 菲律宾节点 | `i-5ts7fo7n0ui3stsujw0r` | `ap-southeast-6`（马尼拉） | 180 GB |
+| 菲律宾节点 | `i-faketest0000stsujw0r` | `ap-southeast-6`（马尼拉） | 180 GB |
 
 > **免费额度提示**：该机器在非中国内地，免费额度 200 GB/月，
 > 按**账号**计算（不是按机器）。同一账号下多台机器共享这一份。
@@ -288,7 +288,7 @@ bash menu.sh status        # 只看当前状态
 巡检后 KV 里的流量台账：
 
 ```json
-[{"instance_id":"i-5ts7fo7n0ui3stsujw0r","name":"菲律宾节点",
+[{"instance_id":"i-faketest0000stsujw0r","name":"菲律宾节点",
   "date":"2026-10-10","time":"16:42","traffic_gb":0.1913}]
 ```
 

@@ -15,7 +15,7 @@ const check = (n, c, e = '') => {
 // —— 线上真实参数（取自 KV config）——
 const LIVE = {
   name: '菲律宾节点',
-  instance_id: 'i-5ts7fo7n0ui3stsujw0r',
+  instance_id: 'i-faketest0000stsujw0r',
   region: 'ap-southeast-6',
   ak: 'LTAIfake000000000000',
   sk: 'fake-secret',
@@ -43,7 +43,7 @@ function makeFetch(trafficGb, status) {
 makeFetch.calls = [];
 
 const ENV = { CDT_GUARD_KV: { get: async () => null, put: async () => {}, delete: async () => {} } };
-const CONFIG = { chat_id: '7912011729', bot_token: 'fake-token' };
+const CONFIG = { chat_id: '1234567890', bot_token: 'fake-token' };
 const orig = globalThis.fetch;
 
 console.log('\n【A 组】线上真实阈值 180GB —— 跨阈边界逐点实测（运行中）');

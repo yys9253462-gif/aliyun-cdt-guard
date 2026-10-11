@@ -20,7 +20,7 @@ import tarfile
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(os.path.dirname(PROJ), "交付物")
-NAME = "cdt-guard-worker-20261010.tar.gz"
+NAME = "cdt-guard-worker-20261011.tar.gz"
 TOP = "cdt-guard-worker"
 
 # 打进包里的内容（相对项目根）。目录会递归。
@@ -68,6 +68,16 @@ LEAK_PATTERNS = [
     (r'\b[0-9a-f]{32}\b', "疑似 KV 命名空间 id（32 位十六进制）"),
     (r'https://[A-Za-z0-9_.-]+\.workers\.dev', "真实 Worker 网址"),
     (r'\bLTAI[0-9A-Za-z]{12,}\b', "疑似阿里云 AccessKey ID"),
+    # 阿里云实例 ID：形如 i- 开头 + 一串小写字母数字。
+    # 🔴 2026-10-11 新增：本轮发现**真实的实例 ID 被写进了注释和文档示例**里
+    #    （configure.sh 的「例如」、README 的配置样例、测试夹具等），
+    #    打包时**完全没被检测到**，会连着真机器 ID 一起发出去。
+    #
+    # ⚠️ 门槛定在「i- 后面至少 12 位」是有原因的：测试夹具里有大量短的
+    #    假 ID（i-aaa111 / i-threshold / i-bbb222 之类），门槛太低会满屏误报。
+    #    真实实例 ID 的随机段一般 16 位以上，12 位已能覆盖各种写法，
+    #    同时避开短的假串。带 fake/test/example/demo 字样的示例照旧放行。
+    (r'\bi-[0-9a-z]{12,}\b', "疑似阿里云实例 ID（i- 开头）"),
 ]
 
 # 允许出现的例外：说明文档 / 测试夹具里**一眼就是假的**占位符。
@@ -79,6 +89,26 @@ LEAK_ALLOW_WORDS = [
 ]
 LEAK_ALLOW = [
     "https://<你的-worker>.workers.dev",
+]
+
+# 这些实例 ID 是**测试夹具里刻意造的假串**，形态上像真的但一眼能看出规律
+# （纯重复数字 / aaa~zzz 顺子 / xyz 循环）。把它们显式放行，否则会满屏误报。
+#
+# ⚠️ 只放行「能一眼看出是造的」的；**真实的随机 ID 绝不能进这个名单**。
+#    判断标准：是否包含「明显的重复或顺序规律」。
+LEAK_ALLOW_IDS = [
+    "i-1111111111aaaaaaaa",
+    "i-2222222222bbbbbbbb",
+    "i-aaa1111111111111",
+    "i-bbb2222222222222",
+    "i-abcdefghijklmnop",
+    "i-new1111111111111",
+    "i-new2222222222222",
+    "i-existing00000000001",
+    "i-x1111111111111",
+    "i-xxxxxxxxxxxxxxxx",
+    "i-xyzxyzxyzxyzxyz",
+    "i-1234567890abcdef",
 ]
 
 
@@ -135,6 +165,9 @@ def scan_leaks(rel, data):
             hit = m.group(0)
             # 命中白名单整串、或整串命中白名单，都放行
             if any(a in hit or hit in a for a in LEAK_ALLOW):
+                continue
+            # 测试夹具里刻意造的假实例 ID（纯重复数字 / 顺子 / 循环），放行
+            if hit in LEAK_ALLOW_IDS:
                 continue
             # 一眼即假的占位符放行（fake / example / test / xxxx ...）
             if _looks_fake(hit):

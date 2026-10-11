@@ -126,7 +126,7 @@ export const DEVICE_ID_TAIL = 8;
 /**
  * 取实例 ID 的尾段（用于按钮显示与精确定位）。
  *
- * `i-5ts7fo7n0ui3stsujw0r` → `3stsujw0r`（取最后 8 位）
+ * `i-faketest0000stsujw0r` → `stsujw0r`（取最后 8 位）
  */
 export function shortIdTail(instanceId) {
   const id = String(instanceId || '').trim();
