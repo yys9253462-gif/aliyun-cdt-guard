@@ -117,9 +117,27 @@ run_wrangler() {
   fi
 }
 
-# 是否已部署（有 .worker-url 或能在 KV 里读到东西）
+# 是否已部署
+#
+# 🔴 这一处曾经误报（2026-10-11 用户实测：「我已经部署了，为什么还显示未部署」）：
+#
+#   旧实现是 `[ -f .worker-url ] && grep -q workers.dev .worker-url` ——
+#   **只看本地这个文件在不在**。可 .worker-url 是「部署那一刻」写在
+#   当时那个目录里的。用户重新解压一份新包、或换个目录跑，文件就不在，
+#   菜单立刻判定「未部署」—— **完全不去问云端**，哪怕 Worker 跑得好好的。
+#   实测确认：云端有部署记录，https://cdt-guard.<账号>.workers.dev 返回 200。
+#
+#   修法：判定「部署没部署」，必须以**真去探测**为准。
+#   probe_worker_url（在 lib-preflight.sh）会：先看本地文件 → 再翻缓存
+#   → 最后构造候选网址**实际访问**（这一步才能识别「换了目录但云端还在」）。
+#   探测成功会顺手回写 .worker-url，下次就走快路径。
+#
+#   注意：探测带网络请求，菜单每次重画都会调它 → 有 curl 超时兜底（单个
+#   候选最多 10 秒）。正常命中第一个候选就返回，不会卡。
 is_deployed() {
-  [ -f .worker-url ] && grep -q 'workers.dev' .worker-url 2>/dev/null
+  local url=""
+  url="$(probe_worker_url 2>/dev/null || true)"
+  [ -n "$url" ]
 }
 
 # 读当前配置里有多少台机器、多少个账号
@@ -168,10 +186,11 @@ config_stats() {
 }
 
 # 统一提取 worker 网址
+#
+# 复用 probe_worker_url（见上面 is_deployed 的说明）—— 不再只依赖本地文件，
+# 这样「换了目录但云端还在」也能正确显示网址。
 worker_url() {
-  if [ -f .worker-url ]; then
-    sed -n 's|\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' .worker-url 2>/dev/null | head -1
-  fi
+  probe_worker_url 2>/dev/null | head -1 || true
 }
 
 # ---------------------------------------------------------------------------

@@ -617,63 +617,6 @@ print_next_steps() {
   printf '%s\n' "完整图文说明见同目录的「部署指南.md」。"
 }
 
-# ---------------------------------------------------------------------------
-# 探测 Worker 的真实访问网址
-# ---------------------------------------------------------------------------
-# wrangler 3.x 不给网址，所以这里自己找：
-#   1. 先从 .wrangler 缓存里翻（有时会记着上次部署的地址）
-#   2. 不行就按 workers.dev 的命名规律构造候选，逐个实际访问
-#   3. 哪个返回 200 就用哪个
-# 全程失败也不要紧 —— 返回空串，调用方会给出兜底提示。
-probe_worker_url() {
-  # 0. 最可靠：第 5 步部署时抓下来的（这个文件就是为此存在的）
-  if [ -f .worker-url ]; then
-    local saved=""
-    saved="$(sed -n 's|\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' .worker-url 2>/dev/null | head -1 || true)"
-    if [ -n "$saved" ]; then
-      printf '%s' "$saved"
-      return 0
-    fi
-  fi
-
-  # 1. 从 .wrangler 缓存里翻
-  local cached=""
-  cached="$(find .wrangler -type f -name '*.json' -exec grep -l 'workers.dev' {} \; 2>/dev/null || true)"
-  if [ -n "$cached" ]; then
-    local found=""
-    found="$(sed -n 's|.*\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' $cached 2>/dev/null | head -1 || true)"
-    if [ -n "$found" ]; then
-      printf '%s' "$found"
-      return 0
-    fi
-  fi
-
-  # 2. 构造候选并实际访问（能连上才算）
-  if ! command -v curl >/dev/null 2>&1; then
-    return 0
-  fi
-
-  # 账号名从 whoami 里取（形如 xxx.workers.dev 或邮件前缀）
-  local account=""
-  account="$(wrun whoami 2>/dev/null \
-    | sed -n 's@.*[[:space:]]\([a-zA-Z0-9-]*\)\.workers\.dev.*@\1@p' 2>/dev/null | head -1 || true)"
-
-  local candidates="cdt-guard.workers.dev"
-  [ -n "$account" ] && candidates="cdt-guard.${account}.workers.dev ${candidates}"
-
-  local candidate
-  for candidate in $candidates; do
-    local code=""
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://${candidate}/" 2>/dev/null || true)"
-    if [ "$code" = "200" ]; then
-      printf 'https://%s' "$candidate"
-      printf 'https://%s\n' "$candidate" > .worker-url 2>/dev/null || true
-      return 0
-    fi
-  done
-
-  return 0
-}
 
 # ---------------------------------------------------------------------------
 # 可复用的动作（由 menu.sh 调用，也可被单独执行）

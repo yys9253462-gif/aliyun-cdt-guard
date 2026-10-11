@@ -42,10 +42,12 @@ done
 group "2. 函数定义完整性"
 # ---------------------------------------------------------------------------
 # deploy.sh 的动作函数（main 按参数分发到这些）
+# ⚠️ probe_worker_url 已迁到 lib-preflight.sh（2026-10-11）—— 菜单也要用它探测
+#    部署状态，放公共库才能两处共用。这里不再要求 deploy.sh 定义它。
 for fn in check_env run_login_only run_full_deploy run_redeploy_only \
           run_selfcheck_only run_reset_webhook_secret \
           do_login do_create_kv do_set_secrets do_deploy \
-          do_selfcheck do_configure print_next_steps probe_worker_url \
+          do_selfcheck do_configure print_next_steps \
           save_webhook_secret_locally; do
   if grep -qE "^${fn}\(\)[[:space:]]*\{" deploy.sh; then
     pass "deploy.sh 定义了 ${fn}()"
@@ -66,10 +68,11 @@ for fn in ensure_wrangler show_current print_config_pretty \
   fi
 done
 
-# lib-preflight.sh：环境体检
+# lib-preflight.sh：环境体检 + 配置修复 + 部署探测（2026-10-11 起后两类也在这里）
 for fn in detect_platform platform_name node_major preflight_node \
           preflight_npm preflight_curl preflight_wrangler \
-          print_node_install_guide preflight_all; do
+          print_node_install_guide preflight_all \
+          ensure_kv_id probe_worker_url; do
   if grep -qE "^${fn}\(\)[[:space:]]*\{" lib-preflight.sh; then
     pass "lib-preflight.sh 定义了 ${fn}()"
   else
@@ -540,6 +543,81 @@ if grep -qF '[a-zA-Z]{2,}' menu.sh; then
   pass "邮箱提取以顶级域名收尾（不会把英文句末的句号一起吃进来）"
 else
   fail "邮箱提取没有限定结尾 —— 会摘出 someone@example.com. 这种带句号的串"
+fi
+
+# ---------------------------------------------------------------------------
+group "17. 部署判定：不得只看本地文件（换目录会误报「未部署」）"
+# ---------------------------------------------------------------------------
+# 🔴 这一组钉死的是 2026-10-11 用户实测反馈的问题：
+#     「我已经部署了，为什么菜单还显示 Worker 未部署？」
+#
+#   根因：旧 is_deployed 只看本地有没有 .worker-url 文件。
+#        而这个文件是「部署那一刻」写在当时那个目录里的 ——
+#        用户重新解压一份新包、换个目录跑，文件就不在，
+#        菜单立刻判定「未部署」，**根本不去问云端**。
+#        实测：云端有部署记录，https://cdt-guard.<账号>.workers.dev 返回 200。
+#
+#   修法：判定要以「真去探测」为准 —— 复用 probe_worker_url
+#        （搬到 lib-preflight.sh，菜单与部署脚本共用一份）。
+#
+#   ⚠️ 反向验证（已实测做过一次）：把 is_deployed 改回
+#      `[ -f .worker-url ] && grep -q workers.dev .worker-url`，
+#      F1 立刻报红 —— 证明它不是永远绿的摆设。
+
+# F1：is_deployed 必须真的去探测，不能只看文件
+#     ⚠️ 判定「旧实现」时要排除注释行 —— 说明里正举着旧写法当反面教材，
+#        直接 grep 全文会命中那段注释，导致永远报红（本条测试自己踩过）。
+_isdeployed_body="$(awk '/^is_deployed\(\)/,/^}/' menu.sh | grep -v '^[[:space:]]*#')"
+if printf '%s' "$_isdeployed_body" | grep -qF 'probe_worker_url' && \
+   ! printf '%s' "$_isdeployed_body" | grep -qF '[ -f .worker-url ]'; then
+  pass "is_deployed 真去探测（不再只看 .worker-url 文件）"
+else
+  fail "is_deployed 仍只看本地文件 —— 换个目录就会误报「未部署」"
+fi
+
+# F2：探测函数必须在公共库（菜单和部署脚本都要用）
+if grep -qE '^probe_worker_url\(\)[[:space:]]*\{' lib-preflight.sh; then
+  pass "lib-preflight.sh 定义了 probe_worker_url()（两处共用一份）"
+else
+  fail "lib-preflight.sh 缺少 probe_worker_url() —— 菜单拿不到探测能力"
+fi
+
+# F3：deploy.sh 不得再自带一份（否则两份实现会跑偏）
+if grep -qE '^probe_worker_url\(\)[[:space:]]*\{' deploy.sh; then
+  fail "deploy.sh 又自带一份 probe_worker_url —— 两份实现会跑偏"
+else
+  pass "deploy.sh 不再重复定义 probe_worker_url（实现只有一份）"
+fi
+
+# F4：🔴 账号名必须从邮箱前缀取，不能从 whoami 抠 *.workers.dev
+#     实测 whoami 的输出里**没有** workers.dev 字样，按它抠只会得到空串，
+#     于是候选只剩 cdt-guard.workers.dev（缺账号前缀）→ 探测必然失败。
+if grep -qF 'cut -d@ -f1' lib-preflight.sh; then
+  pass "账号名从登录邮箱前缀取（实测有效：cdt-guard.<邮箱前缀>.workers.dev）"
+else
+  fail "账号名来源不对 —— 从 whoami 抠 *.workers.dev 会得到空串，探测必失败"
+fi
+
+# F5：必须真的发请求验证（能连上才算数）
+if grep -qF "http_code" lib-preflight.sh; then
+  pass "构造候选后实际访问（能连上才算已部署）"
+else
+  fail "没有实际访问 —— 只靠猜名字无法确认云端到底有没有"
+fi
+
+# F6：探测命中要顺手回写 .worker-url（下次走快路径）
+if grep -qF '.worker-url' lib-preflight.sh && grep -qF '> .worker-url' lib-preflight.sh; then
+  pass "探测命中后回写 .worker-url（下次走快路径，不必再发请求）"
+else
+  fail "探测命中没有回写 —— 每次打开菜单都要重新发网络请求"
+fi
+
+# F7：worker_url() 也要复用探测（否则「已部署」却显示不出网址）
+if grep -qE '^worker_url\(\)' menu.sh && \
+   awk '/^worker_url\(\)/,/^}/' menu.sh | grep -qF 'probe_worker_url'; then
+  pass "worker_url() 复用探测（换目录也能显示出正确网址）"
+else
+  fail "worker_url() 仍只看本地文件 —— 换目录时「已部署」后面会是空的"
 fi
 
 # ---------------------------------------------------------------------------

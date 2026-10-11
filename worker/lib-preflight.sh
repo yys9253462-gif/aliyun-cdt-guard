@@ -728,3 +728,121 @@ PYEOF
   cp "$backup" "$cfg"; rm -f "$backup"
   return 1
 }
+
+# ===========================================================================
+# 部署探测：找出 Worker 的真实访问网址（以及「到底部署没部署」）
+# ===========================================================================
+#
+# 🔴 为什么这个函数也在 lib-preflight.sh（2026-10-11，与 ensure_kv_id 同理）
+#
+#   用户实测反馈：「我已经部署了，为什么菜单还显示 Worker 未部署？」
+#   查下来是**误报** —— 云端 Worker 明明在跑（访问返回 200）。
+#
+#   根因：menu.sh 判断「部署没部署」的方式是**只看本地有没有 .worker-url 文件**：
+#       is_deployed() { [ -f .worker-url ] && grep -q 'workers.dev' .worker-url; }
+#   这个文件是「部署那一刻」写下来的。于是只要：
+#       · 换了个目录（比如重新解压一份新的包）—— 文件不在新目录里
+#       · 或者手工删过、换过电脑
+#   菜单就一口咬定「未部署」，**根本不去问云端**。哪怕 Worker 跑得好好的。
+#
+#   正确做法：**真的去探测**（本地文件只是最省事的快路径，不是唯一依据）。
+#   而且探测能力本来就有 —— deploy.sh 里的 probe_worker_url 一直会
+#   「构造候选网址逐个访问」。问题是：
+#       (1) 只有 deploy.sh 用得到，菜单用不上；
+#       (2) 它构造候选用的账号名是从 whoami 输出里正则抠 *.workers.dev，
+#           但实测 whoami **根本不输出这个字符串** → 抠出来是空的，
+#           候选只剩 `cdt-guard.workers.dev`（缺账号前缀）→ 必然失败。
+#
+#   所以这里做了两件事：
+#       · 搬到公共库，菜单和部署脚本共用同一份；
+#       · **修正账号名来源** —— 改用「登录邮箱前缀」（实测有效：
+#         cdt-guard.yys9253462.workers.dev 返回 200）。
+#
+# 探测顺序（从快到慢，命中即回）：
+#   0. 本地 .worker-url（部署时写的，最快）
+#   1. .wrangler 缓存里翻（有时留着上次部署的地址）
+#   2. 构造候选网址 + 实际访问（最可靠 —— 能连上才算数）
+#      候选来源：邮箱前缀 / wrangler.toml 里的 name
+#   命中后**顺手回写 .worker-url**，下次就走上第 0 条快路径。
+#
+# 全程失败不要紧 —— 返回空串，调用方自己给兜底提示（不该报错吓人）。
+# ---------------------------------------------------------------------------
+probe_worker_url() {
+  local quiet="${1:-}"
+
+  # 0. 本地文件（部署时抓下来的，最省事）
+  if [ -f .worker-url ]; then
+    local saved=""
+    saved="$(sed -n 's|\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' .worker-url 2>/dev/null | head -1 || true)"
+    if [ -n "$saved" ]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+
+  # 1. 从 .wrangler 缓存里翻
+  local cached=""
+  cached="$(find .wrangler -type f -name '*.json' -exec grep -l 'workers.dev' {} \; 2>/dev/null || true)"
+  if [ -n "$cached" ]; then
+    local found=""
+    # shellcheck disable=SC2086
+    found="$(sed -n 's|.*\(https://[a-zA-Z0-9._-]*\.workers\.dev\).*|\1|p' $cached 2>/dev/null | head -1 || true)"
+    if [ -n "$found" ]; then
+      printf '%s' "$found"
+      return 0
+    fi
+  fi
+
+  # 2. 构造候选 + 实际访问（只有这一步能识别「换了目录但云端还在」的情况）
+  if ! command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # worker 名：以 wrangler.toml 里的 name 为准，缺省 cdt-guard
+  local wname="cdt-guard"
+  local cfg_name=""
+  cfg_name="$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.toml 2>/dev/null | head -1 || true)"
+  [ -n "$cfg_name" ] && wname="$cfg_name"
+
+  # 🔴 账号名：必须用「登录邮箱前缀」。
+  #    实测 whoami 的输出里**没有** *.workers.dev 字样，按它抠只会得到空串。
+  #    而 Cloudflare 的 workers.dev 子域默认就是邮箱前缀（小写）。
+  local acct=""
+  local _email=""
+  _email="$(kv_wrangler_whoami 2>/dev/null \
+    | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' \
+    | head -1 || true)"
+  if [ -n "$_email" ]; then
+    acct="$(printf '%s' "$_email" | cut -d@ -f1 | tr 'A-Z' 'a-z')"
+  fi
+
+  # 候选：带账号前缀的优先（实测这个才是对的），裸名兜底
+  local candidates=""
+  [ -n "$acct" ] && candidates="${wname}.${acct}.workers.dev"
+  candidates="${candidates} ${wname}.workers.dev"
+
+  local candidate code
+  for candidate in $candidates; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${candidate}/" 2>/dev/null || true)"
+    if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ] || [ "$code" = "401" ] || [ "$code" = "403" ]; then
+      # 200/3xx/401/403 都说明「这个 Worker 存在且在响应」——
+      # 未授权的访问返回 401/403 属正常（我们没带密钥），不代表没部署。
+      printf 'https://%s' "$candidate"
+      # 顺手回写，下次走快路径
+      printf 'https://%s\n' "$candidate" > .worker-url 2>/dev/null || true
+      return 0
+    fi
+  done
+
+  [ -n "$quiet" ] || true
+  return 0
+}
+
+# 取当前登录邮箱（自包含，供上面探测用；menu.sh 自己那份叫 logged_in_email）
+kv_wrangler_whoami() {
+  local WC
+  WC="$(kv_wrangler)"
+  [ -n "$WC" ] || return 1
+  # shellcheck disable=SC2086
+  $WC whoami 2>/dev/null
+}
