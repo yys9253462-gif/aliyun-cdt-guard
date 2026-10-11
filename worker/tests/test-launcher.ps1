@@ -122,6 +122,39 @@ if (Test-Path $batPath) {
 
     # 8d. 不能写死中文文件名（.bat 里写中文路径会因 GBK 解码而匹配不到）
     Check "启动.bat 用通配符定位 .ps1（不写死中文名）" ($batText -match '\*\.ps1')
+
+    # 8e. 🔴 必须自动清除「来自互联网」标记（MOTW / Zone.Identifier）
+    #
+    # 为什么要有这一条：
+    #   从网盘下载解压出来的文件，每一个都会带 NTFS 附加流
+    #   Zone.Identifier（ZoneId=3 = Internet）。Windows 因此把它们当可疑文件，
+    #   实测用户报的症状就是「双击打开就闪退」，偶尔还能看到安全提示一闪而过。
+    #   解决方案必须能在启动真正的流程之前，把整个目录的这层标记清掉。
+    #   少这一步，用户就得多手动「右键→属性→解除锁定」一次，
+    #   而小白根本不知道要这么做 —— 所以他只会说「打不开」。
+    #
+    # 为什么检查的是「.bat 或 .ps1 二者之一」：
+    #   实测结论 —— .bat 里用 cmd.exe -> powershell.exe -Command
+    #   "Unblock-File ..." 这种一行式调用，40 个带标记的文件一个都没清掉
+    #   （静默失效）；同一句写在 .ps1 里执行则 52 个全部清干净。
+    #   所以真正的实现放在 .ps1，.bat 只负责用 -UnblockOnly 调它。
+    #   只要「两者合起来」能把整个目录清干净就算通过，不限定写在哪个文件。
+    $ps1Path = Join-Path $scriptDir '安装.ps1'
+    $ps1Text = if (Test-Path $ps1Path) { [System.IO.File]::ReadAllText($ps1Path) } else { '' }
+    $unblockInBat = ($batText -match 'Unblock-File')
+    $unblockInPs1 = ($ps1Text -match 'Unblock-File')
+
+    Check "有自动解除「来自网络」标记的实现（Unblock-File）" ($unblockInBat -or $unblockInPs1) `
+        "缺少 Unblock-File，下载后的文件会因 MOTW 被拦，表现为双击闪退"
+
+    # 无论实现在哪，都必须覆盖整个目录（只清单个文件是不够的：
+    # .ps1 / .sh / tests 下的子文件同样带标记）
+    Check "解除范围覆盖整个目录（-Recurse）" (($batText -match '-Recurse') -or ($ps1Text -match '-Recurse')) `
+        "只解除单个文件不够 —— .ps1/.sh 子文件同样带标记"
+
+    # .bat 必须真的会触发这一步（否则 .ps1 里写了也不会执行）
+    Check "启动.bat 会触发解阻塞步骤（-UnblockOnly）" ($batText -match '-UnblockOnly') `
+        "解阻塞实现在 .ps1，.bat 必须用 -UnblockOnly 调用它"
 }
 
 Write-Host "  ------------------------------------------------------------" -ForegroundColor DarkGray

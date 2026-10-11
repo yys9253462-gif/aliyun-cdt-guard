@@ -14,6 +14,58 @@ $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
+$scriptDirEarly = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# ---------------------------------------------------------------------------
+# 解阻塞（去「来自互联网」标记）
+# ---------------------------------------------------------------------------
+# 🔴 这段必须留在 PowerShell 脚本里，**不能**挪到 .bat 里做。实测教训：
+#    .bat 里用 cmd.exe -> powershell.exe -Command "...Unblock-File..." 这种
+#    一行式调用，跑完 40 个带标记的文件**一个都没清掉**（静默失效）；
+#    而同样一句 Unblock-File 写在 .ps1 里执行，52 个文件全部清干净。
+#    原因是 -Command 形式从 cmd 启动时丢了管道上下文。
+#
+#    这一步为什么重要：
+#    从浏览器 / 网盘下载再解压出来的文件，每个都带 NTFS 附加流
+#    Zone.Identifier（ZoneId=3 = 来自互联网）。Windows 于是把它们当可疑文件，
+#    用户看到的现象就是「双击打开、窗口一闪就没了」，偶尔还有安全提示一闪而过。
+#
+# 调用方式：
+#   .bat 先用 -UnblockOnly 静默跑一次（清完就退），再正常启动菜单。
+#   也允许用户手动执行：powershell -File 安装.ps1 -UnblockOnly
+# ---------------------------------------------------------------------------
+function Clear-DownloadTag {
+    param([string]$Dir)
+    $removed = 0
+    $failed  = 0
+    try {
+        $files = Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue
+    } catch { return @{ Removed = 0; Failed = 0 } }
+    foreach ($f in $files) {
+        # 只处理确实带标记的，避免对每个文件都做一次无用的流查询
+        $tagged = $null
+        try {
+            $tagged = Get-Item -LiteralPath $f.FullName -Stream * -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Stream -eq 'Zone.Identifier' }
+        } catch { }
+        if (-not $tagged) { continue }
+        try {
+            Unblock-File -LiteralPath $f.FullName -ErrorAction Stop
+            $removed++
+        } catch {
+            # 被占用 / 只读 / 特殊文件系统 —— 忽略，不影响主流程
+            $failed++
+        }
+    }
+    return @{ Removed = $removed; Failed = $failed }
+}
+
+if ($args -contains '-UnblockOnly') {
+    $r = Clear-DownloadTag -Dir $scriptDirEarly
+    Write-Host "已解除「来自网络」标记：$($r.Removed) 个文件"
+    exit 0
+}
+
 function Show-Banner {
     Write-Host ""
     Write-Host "  ============================================================" -ForegroundColor Cyan

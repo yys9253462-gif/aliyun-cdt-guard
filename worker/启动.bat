@@ -14,10 +14,27 @@ rem    executed as commands. All Chinese messages live in the .ps1 file,
 rem    which PowerShell reads as UTF-8 correctly.
 rem
 rem  WHAT IT DOES
-rem    Finds PowerShell and hands over to the real launcher (install .ps1).
+rem    1. Finds PowerShell and hands over to the real launcher (install .ps1).
+rem    2. Unblocks the downloaded files first (see below).
+rem
+rem  WHY THE UNBLOCK STEP EXISTS  -- READ THIS BEFORE DELETING IT
+rem    Files that arrive through a browser / cloud drive are tagged with a
+rem    "Mark of the Web" (an NTFS alternate data stream named Zone.Identifier,
+rem    with ZoneId=3 = Internet). Windows then treats every one of them as
+rem    suspicious. Real-world symptoms reported by users of an earlier build:
+rem      - double-clicking the launcher "opens and instantly closes"
+rem      - a security prompt flashes by too fast to read
+rem      - PowerShell refuses to run the script even with Bypass
+rem    The reliable cure is to strip that tag from the whole folder before we
+rem    start. It is a purely local, per-file flag; removing it changes nothing
+rem    about the file contents and does NOT need administrator rights.
 rem ===========================================================================
 
 setlocal enabledelayedexpansion
+
+rem Give the console window a recognizable name, so the user can tell it apart
+rem from other black windows that may be open.
+title CDT Guard - Installer
 
 rem Run from the folder this .bat lives in, so relative paths work
 rem even when the user launched us from somewhere else.
@@ -82,6 +99,29 @@ if not defined PSEXE (
     pause
     exit /b 1
 )
+
+rem ---------------------------------------------------------------------------
+rem STEP 1: remove the "downloaded from the Internet" tag from this folder.
+rem
+rem WHY: files that arrive through a browser or a cloud drive get a "Mark of
+rem the Web" - an NTFS alternate data stream named Zone.Identifier holding
+rem "ZoneId=3" (= Internet). Windows then treats every one of them as
+rem suspicious, and the symptom users report is exactly "double-click opens
+rem and instantly closes", sometimes with a security prompt that flashes by.
+rem
+rem IMPORTANT - why this calls the .ps1 with -UnblockOnly instead of doing the
+rem unblocking here with an inline PowerShell one-liner:
+rem   Measured on a real download folder, an inline one-liner run through
+rem   cmd.exe -> powershell.exe -Command left ALL 40 tagged files untouched
+rem   (silent no-op), while the same Unblock-File call executed inside a
+rem   PowerShell script removed all of them. The -Command form loses the
+rem   pipeline when launched from cmd. So the work is delegated to the
+rem   launcher script, where it actually works.
+rem
+rem Output goes to nul and failures are ignored on purpose: unblocking is a
+rem convenience. If it cannot run, we still try the real launcher below.
+rem ---------------------------------------------------------------------------
+"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -UnblockOnly >nul 2>nul
 
 rem -NoProfile  : ignore the user's profile (faster, fewer surprises)
 rem -ExecutionPolicy Bypass : this run only; nothing is changed permanently
