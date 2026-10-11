@@ -52,10 +52,56 @@ cd "$DIR" || { echo "无法进入项目目录"; exit 1; }
 # ---------------------------------------------------------------------------
 # 状态探测：菜单要显示「当前是什么状态」，才能引导用户做对该做的事
 # ---------------------------------------------------------------------------
+# 🔴 这里踩过一个大坑，务必看清再改（2026-10-11 用户实测复现）：
+#
+#   交付包里 wrangler.toml 的 KV id 是**故意留空**的（`id = ""`）。
+#   但 wrangler **任何**命令启动时都会先解析这个文件，id 为空时**直接报错退出**
+#   —— 连 `whoami` 都不例外：
+#     X [ERROR] "kv_namespaces[0]" bindings should have a string "id" field
+#
+#   后果：菜单一打开就显示「Cloudflare 未登录 / Worker 未部署」，
+#   哪怕用户明明已经登录、代码也已经部署过。用户会以为是自己没登录，
+#   反复去点「一站式安装」，每次都被一个空 id 卡住。
+#
+#   所以：**判断登录之前，必须先确保配置是合法的**。
+#   修复的实现 ensure_kv_id() 已放进 lib-preflight.sh（上面刚 source 过），
+#   那里两个入口都能拿到，保证「实现只有一份」，不会跑偏。
+#
+#   注意：这个函数在探测阶段**必须保持安静** —— 菜单是刷新式的，
+#   每次重画都打印一堆「正在查找存储...」会刷屏。所以传 quiet 让它闭嘴。
+ensure_config_ready() {
+  # 配置已经合法 → 什么都不用做
+  grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"[0-9a-f]{32}"' wrangler.toml 2>/dev/null && return 0
+
+  # 需要修复，但修复函数还没加载（例如单独 source 了 menu.sh）→ 尽力而为
+  if declare -F ensure_kv_id >/dev/null 2>&1; then
+    ensure_kv_id quiet >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
 # 是否已登录 Cloudflare
 is_logged_in() {
-  preflight_wrangler || return 1
+  preflight_wrangler 2>/dev/null || return 1
+  # 先让配置合法，否则 whoami 会因「空的 id」而失败，被误判成「没登录」
+  ensure_config_ready || return 1
   run_wrangler whoami >/dev/null 2>&1
+}
+
+# 当前登录的邮箱（取不到就输出空）
+#
+# 为什么要单独提取邮箱：状态栏只写「已登录」，用户没法确认登的是不是自己
+# 以为的那个账号（有人有多个 Cloudflare 账号）。把邮箱显出来，一眼就能核对。
+#
+# ⚠️ 提取用 `\.[a-zA-Z]{2,}` 收尾，并且**必须剔除句末标点**：
+#    直接 `grep -oE '[..]+@[..]+'` 会把 whoami 那句英文末尾的句号一起吃掉，
+#    摘出来变成 "someone@example.com."（尾巴多一个点），很难看。
+logged_in_email() {
+  local out=""
+  out="$(run_wrangler whoami 2>/dev/null \
+    | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' \
+    | head -1 || true)"
+  printf '%s' "$out"
 }
 
 # 统一调用 wrangler（与 deploy.sh 保持一致的策略）
@@ -149,7 +195,13 @@ show_header() {
   fi
 
   if is_logged_in; then
-    printf "  Cloudflare     ${GREEN}已登录${RESET}\n"
+    local _email=""
+    _email="$(logged_in_email)"
+    if [ -n "$_email" ]; then
+      printf "  Cloudflare     ${GREEN}已登录${RESET}  ${DIM}%s${RESET}\n" "$_email"
+    else
+      printf "  Cloudflare     ${GREEN}已登录${RESET}\n"
+    fi
   else
     printf "  Cloudflare     ${YELLOW}未登录${RESET}\n"
   fi

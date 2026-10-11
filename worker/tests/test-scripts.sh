@@ -447,6 +447,102 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+group "16. 状态探测：空 id 不得把「已登录」误判成「未登录」"
+# ---------------------------------------------------------------------------
+# 🔴 这一组钉死的是 2026-10-11 用户实测反馈的问题：
+#     「我已经登录了，为什么菜单还显示我未登录未部署？」
+#
+#   根因：交付包里 wrangler.toml 的 KV id 是空的（`id = ""`）。
+#        wrangler 的**任何**命令启动时都会先解析配置，id 为空就直接报错，
+#        连 whoami 也不例外 → 菜单据此判定「未登录」（误报）。
+#
+#   修法：探测登录前先让配置合法。修复函数 ensure_kv_id 放在 lib-preflight.sh，
+#        这样 menu.sh（打开菜单就要用）和 deploy.sh 都能拿到，实现只有一份。
+#
+#   ⚠️ 反向验证（已实测做过一次）：把 ensure_config_ready 里那行
+#      `ensure_kv_id quiet` 删掉，菜单立刻又变回「未登录」，
+#      本组测试中的第 3 条随之报红 —— 证明它不是永远绿的摆设。
+
+# E1：修复函数必须在 lib-preflight.sh（两边都能拿到的公共库）
+if grep -qE '^ensure_kv_id\(\)[[:space:]]*\{' lib-preflight.sh; then
+  pass "lib-preflight.sh 定义了 ensure_kv_id()（menu.sh 与 deploy.sh 都能拿到）"
+else
+  fail "lib-preflight.sh 缺少 ensure_kv_id() —— 菜单打开时无修复函数可用，会误报「未登录」"
+fi
+
+# E2：deploy.sh 不得再自带一份（否则两份实现会跑偏）
+if grep -qE '^ensure_kv_id\(\)[[:space:]]*\{' deploy.sh; then
+  fail "deploy.sh 又把它定义回去了 —— 两份实现会跑偏，必须只用 lib-preflight.sh 那份"
+else
+  pass "deploy.sh 不再重复定义 ensure_kv_id（实现只有一份）"
+fi
+
+# E3：deploy.sh 必须引用 lib-preflight.sh，否则它调 ensure_kv_id 会 command not found
+if grep -qF '. ./lib-preflight.sh' deploy.sh; then
+  pass "deploy.sh 引用了 lib-preflight.sh"
+else
+  fail "deploy.sh 没引用 lib-preflight.sh —— 调用 ensure_kv_id 时会报 command not found"
+fi
+
+# E4：menu.sh 探测登录之前，必须先确保配置合法
+if grep -qF 'ensure_config_ready || return 1' menu.sh; then
+  pass "menu.sh 的 is_logged_in 先修配置再探测（避免空 id 误判成未登录）"
+else
+  fail "menu.sh 的 is_logged_in 没有先修配置 —— 空 id 时会把已登录误报成未登录"
+fi
+
+# E5：探测阶段必须安静（菜单是刷新式的，刷屏会糊掉整个界面）
+if grep -qF 'ensure_kv_id quiet' menu.sh; then
+  pass "menu.sh 用 quiet 模式调用修复函数（探测时不刷屏）"
+else
+  fail "menu.sh 没传 quiet —— 菜单每次重画都会打印一堆「正在查找存储」，刷屏"
+fi
+
+# E6：修复函数必须支持 quiet 参数（否则 E5 无从谈起）
+if grep -qE 'local quiet=' lib-preflight.sh; then
+  pass "ensure_kv_id 支持 quiet 参数"
+else
+  fail "ensure_kv_id 不接受 quiet 参数，菜单探测会刷屏"
+fi
+
+# E7：list 输出必须先剥掉警告行，否则 JSON 解析失败会被误判成「没有同名存储」→ 误建重复空间
+#     ⚠️ 匹配串里的 $p 必须用单引号，否则会被 shell 当成变量展开成空串（本条测试自己踩过）
+if grep -qF 'sed -n '"'"'/^\[/,$p'"'"'' lib-preflight.sh; then
+  pass "剥掉 wrangler 打到标准输出的警告行（否则会误建重复存储）"
+else
+  fail "没有剥警告行 —— JSON 里混入「Proxy environment variables detected」会解析失败，误判成要新建"
+fi
+
+# E8：写回必须用 python（sed 会把 CRLF 行尾全吃成 LF，等于悄悄改了原文件）
+if grep -qF 're.subn' lib-preflight.sh; then
+  pass "用 python 只替换 id 行的值（保住 CRLF 行尾）"
+else
+  fail "没找到 python 写回逻辑 —— 若改用 sed，交付包的 CRLF 会被整份改成 LF"
+fi
+
+# E9：临时注释 [[kv_namespaces]] 必须用标准 TOML 的 `#`（自定义前缀会被 wrangler 判语法错）
+if grep -qF 'CDT_GUARD_OFF' lib-preflight.sh; then
+  pass "用 # 前缀临时注释（TOML 只认 #，其他前缀会报 Invalid character）"
+else
+  fail "没找到临时注释逻辑 —— 不注释掉 KV 段，查 id 这件事本身会被空 id 卡死（死锁）"
+fi
+
+# E10：菜单状态栏要显示登录邮箱（用户可能有好几个账号，光写「已登录」没法核对）
+if grep -qE '^logged_in_email\(\)[[:space:]]*\{' menu.sh; then
+  pass "menu.sh 定义了 logged_in_email()（状态栏可显示是哪个账号）"
+else
+  fail "menu.sh 没有 logged_in_email() —— 状态栏只说「已登录」，多账号用户无法核对"
+fi
+
+# E11：提取邮箱时尾巴不能带上句末标点
+#      （whoami 那句英文末尾有个句号，裸 [^ ]+ 会把句号一起吃进来）
+if grep -qF '[a-zA-Z]{2,}' menu.sh; then
+  pass "邮箱提取以顶级域名收尾（不会把英文句末的句号一起吃进来）"
+else
+  fail "邮箱提取没有限定结尾 —— 会摘出 someone@example.com. 这种带句号的串"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n==========================================\n'
 printf '脚本自检结果: 通过 %d / 失败 %d\n' "$PASS" "$FAIL"
 printf '==========================================\n'

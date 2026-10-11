@@ -545,3 +545,186 @@ preflight_all() {
   fi
   return 1
 }
+
+# ===========================================================================
+# 配置修复：把 wrangler.toml 里留空的 KV 存储 id 补齐
+# ===========================================================================
+#
+# 🔴 为什么这个函数放在 lib-preflight.sh，而不是留在 deploy.sh（2026-10-11）
+#
+#   交付包里的 wrangler.toml 把 KV 存储 id 写成 `id = ""`（脱敏，不泄露你的空间）。
+#   但 wrangler **任何**命令启动时都会先解析这个文件，id 为空时**直接报错退出**
+#   —— 连 `whoami`、`kv namespace list` 都不例外。实测原话：
+#     X [ERROR] Processing wrangler.toml configuration:
+#       - "kv_namespaces[0]" bindings should have a string "id" field but got
+#         {"binding":"CDT_GUARD_KV","id":""}
+#
+#   后果（用户实测反馈）：「我已经登录了，为什么菜单还显示我未登录未部署？」
+#   —— 因为菜单用 `wrangler whoami` 探测登录状态，而 whoami 被空 id 卡死了，
+#      失败 → 被误判成「没登录」。用户会以为自己没登录，反复去点安装。
+#
+#   所以：**任何「探测状态」的地方，都必须先把配置修合法，再探测。**
+#   而「探测状态」发生在菜单打开的那一瞬间（menu.sh），那时 deploy.sh
+#   还**没有被 source**（它要到菜单第 263 行才按需载入）——
+#   于是 ensure_kv_id 必须放在一个「两边都能拿到」的地方。
+#
+#   放在这里的原因：本文件已被 menu.sh 引用；deploy.sh 现在也会引用它
+#   （见 deploy.sh 顶部）。**实现只有一份**，两个入口不会跑偏。
+#
+# 设计要点（都是踩出来的，别改动）：
+#   · **自包含**：内部自带 wrangler 探测（kv_wrangler），不依赖外部变量，
+#     这样单独 source 本文件也不会「函数找到了但一跑就报未定义」。
+#   · **必须先注释掉 [[kv_namespaces]]、再查 id**：否则查 id 这件事本身
+#     就被空 id 卡死（死锁）。注释符必须是标准 TOML 的 `#`。
+#   · **list 的输出要先剥掉警告行**：wrangler 会把「检测到代理环境变量」
+#     之类的提示**打到标准输出**，和 JSON 混在一起会让解析失败 ——
+#     而「解析失败」会被误当成「云端没有同名存储」，于是误建重复空间。
+#   · **写回用 python 不用 sed**：交付包是 CRLF 行尾，`sed -i` 会把整个文件
+#     的行尾全吃成 LF，等于悄悄改了人家原文件。python 只换 id 那一行的值。
+#   · **保持安静**：探测阶段（菜单每次重画都会跑）不能刷屏，因此成功路径
+#     不打印「正在查找...」之类；只有出错才用 err 说明。
+#
+# 参数：$1 = quiet（可选）。传了 quiet 就只在失败时输出，成功不吭声。
+# 返回：0 = 配置已合法（本来就合法，或刚刚修好）；非 0 = 没搞定。
+# ---------------------------------------------------------------------------
+
+# 探测可用的 wrangler 调用方式（自包含，不动全局变量）
+kv_wrangler() {
+  if [ -x "node_modules/.bin/wrangler" ]; then
+    printf '%s' "node_modules/.bin/wrangler"
+  elif [ -x "node_modules/.bin/wrangler.cmd" ]; then
+    printf '%s' "node_modules/.bin/wrangler.cmd"
+  elif command -v wrangler >/dev/null 2>&1; then
+    printf '%s' "wrangler"
+  else
+    printf '%s' ""
+  fi
+}
+
+ensure_kv_id() {
+  local quiet="${1:-}"
+  local cfg="wrangler.toml"
+  local kv_name="CDT_GUARD_KV"
+
+  # 配置已经合法（已有 32 位十六进制 id）→ 什么都不用做
+  if grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"[0-9a-f]{32}"' "$cfg" 2>/dev/null; then
+    return 0
+  fi
+
+  [ -f "$cfg" ] || { [ -n "$quiet" ] || err "找不到配置文件 $cfg。"; return 1; }
+
+  local WC
+  WC="$(kv_wrangler)"
+  if [ -z "$WC" ]; then
+    [ -n "$quiet" ] || err "还没安装部署工具，暂时无法自动补全存储编号。"
+    return 1
+  fi
+
+  local backup="${cfg}.bak-$(date +%Y%m%d%H%M%S)"
+
+  # 1) 备份
+  cp "$cfg" "$backup" || { err "无法备份配置文件，已中止。"; return 1; }
+
+  # 2) 临时注释掉 [[kv_namespaces]] 段，让 wrangler 能启动
+  #    用 python 做，避免 sed 在不同平台的转义差异；失败则还原。
+  local tmpcfg="${cfg}.tmp-$$"
+  local _PY
+  if command -v python3 >/dev/null 2>&1; then _PY=python3; else _PY=python; fi
+  if ! "$_PY" - "$cfg" "$tmpcfg" <<'PYEOF'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src, encoding="utf-8").read()
+# ⚠️ 必须用标准 TOML 注释符 `#`。踩坑：曾用自定义前缀 _CDTGUARD_OFF_，
+#    wrangler 直接报 Invalid character, expected "=" —— TOML 只认 # 开头。
+s = re.sub(r'^\[\[kv_namespaces\]\]', r'# CDT_GUARD_OFF [[kv_namespaces]]', s, flags=re.M)
+s = re.sub(r'^binding\s*=\s*"CDT_GUARD_KV"', r'# CDT_GUARD_OFF binding = "CDT_GUARD_KV"', s, flags=re.M)
+s = re.sub(r'^id\s*=\s*""', r'# CDT_GUARD_OFF id = ""', s, flags=re.M)
+open(dst, "w", encoding="utf-8").write(s)
+PYEOF
+  then
+    err "临时改写配置文件失败，已中止。"
+    rm -f "$tmpcfg" "$backup"
+    return 1
+  fi
+  cp "$tmpcfg" "$cfg" 2>/dev/null || { mv -f "$tmpcfg" "$cfg" 2>/dev/null || cp "$tmpcfg" "$cfg"; }
+  rm -f "$tmpcfg"
+
+  # 3) 现在 wrangler 可用了，去云端查同名存储
+  local listed rc found_id="" clean=""
+  # shellcheck disable=SC2086
+  listed="$($WC kv namespace list 2>/dev/null)"
+  rc=$?
+
+  if [ $rc -ne 0 ] || [ -z "$listed" ]; then
+    # ⚠️ 与「没有同名存储」严格区分：这多半是没登录 / 网络不通，
+    #    绝不能往下走「新建」，否则会误报成「新建失败」把用户带偏。
+    err "查询云端存储列表失败（可能是还没登录，或网络不通）。"
+    cp "$backup" "$cfg"; rm -f "$backup"
+    return 1
+  fi
+
+  # 剥掉 wrangler 打到 stdout 的警告行（否则 JSON 解析失败 → 误判「没有」→ 误建）
+  clean="$(printf '%s' "$listed" | sed -n '/^\[/,$p')"
+  [ -z "$clean" ] && clean="$listed"
+
+  if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+    found_id="$(printf '%s' "$clean" | "$_PY" -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in (data or []):
+    if item.get('title') == '$kv_name':
+        print(item.get('id', ''))
+        break
+" 2>/dev/null)"
+  else
+    found_id="$(printf '%s' "$clean" | tr -d ' \n' \
+      | grep -oE "\"id\":\"[0-9a-f]{32}\",\"title\":\"$kv_name\"" \
+      | grep -oE '[0-9a-f]{32}' | head -1)"
+  fi
+
+  if [ -z "$found_id" ]; then
+    local output
+    # shellcheck disable=SC2086
+    if ! output="$($WC kv namespace create "$kv_name" 2>&1)"; then
+      printf '%s\n' "$output"
+      err "新建存储失败，已还原配置文件。"
+      cp "$backup" "$cfg"; rm -f "$backup"
+      return 1
+    fi
+    found_id="$(printf '%s' "$output" | grep -oE '[0-9a-f]{32}' | head -1)"
+  else
+    [ -n "$quiet" ] || ok "找到已有的同名存储，直接复用（不重复创建）：$found_id"
+  fi
+
+  if [ -z "$found_id" ]; then
+    err "没有拿到存储编号，已还原配置文件。"
+    cp "$backup" "$cfg"; rm -f "$backup"
+    return 1
+  fi
+
+  # 4) 从备份恢复结构，再把真实 id 填进去（只动 id 行的值，行尾不碰）
+  cp "$backup" "$cfg" || return 1
+  if "$_PY" - "$cfg" "$found_id" <<'PYEOF'
+import re, sys
+path, new_id = sys.argv[1], sys.argv[2]
+with open(path, "rb") as fh:
+    raw = fh.read()
+text = raw.decode("utf-8")
+new_text, n = re.subn(r'^(id\s*=\s*)"[^"]*"', lambda m: m.group(1) + '"' + new_id + '"',
+                      text, count=1, flags=re.M)
+if n == 0:
+    sys.exit(1)
+with open(path, "wb") as fh:
+    fh.write(new_text.encode("utf-8"))
+PYEOF
+  then
+    [ -n "$quiet" ] || ok "存储编号已写入配置文件：$found_id"
+    return 0
+  fi
+  err "写配置文件失败，已从备份恢复。"
+  cp "$backup" "$cfg"; rm -f "$backup"
+  return 1
+}
