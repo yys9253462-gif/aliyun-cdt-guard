@@ -32,6 +32,14 @@ cd "$DIR" 2>/dev/null || { echo "无法进入项目目录"; exit 1; }
 #    所以只记下路径，真正要用的时候（run_configure 里）再创建。
 TEMP_JSON="$(mktemp -u 2>/dev/null || echo "./.config-temp.json")"
 
+# CDT 查询端点覆盖（国际站账号用）。
+# 空 = 国内站默认（cdt.aliyuncs.com），99% 的用户都是这个，不用管。
+# 国际站账号（alibabacloud.com 注册）的 CDT 计量数据在国际站体系，
+# 国内站端点查出来的数可能对不上 —— 这种用户要在 ask_cdt_site() 里显式填写。
+# 该值由 ask_cdt_site() 问一次，随后写进每台机器的 JSON（cdt_endpoint 字段）。
+CDT_ENDPOINT_OPT=""
+CDT_SITE_ASKED=0
+
 # ---------------------------------------------------------------------------
 # 部署工具调用方式
 # ---------------------------------------------------------------------------
@@ -297,6 +305,53 @@ ask_validated() {
 }
 
 # ---------------------------------------------------------------------------
+# 询问 CDT 查询端点归属（只问一次）
+# ---------------------------------------------------------------------------
+# 为什么要有这个问题：
+#     CDT 的计量数据分国内站 / 国际站两套体系。国内站账号用默认端点
+#     cdt.aliyuncs.com 就行；国际站账号（在 alibabacloud.com 注册、
+#     在国际站控制台买机器）如果也用国内站端点，流量数据会对不上，
+#     表现为「额度不更新 / 数字和控台不一样」。
+#
+# 为什么默认留空、且不猜国际站域名：
+#     国际站的 CDT API 端点域名没有权威文档坐实，不写死、不猜测，
+#     由用户按自己的账号归属显式填。宁可留空走默认，也不编一个域名
+#     让所有国际站用户一起查错。
+#
+# 只问一次（CDT_SITE_ASKED 记忆）：同一个会话里配多台机器不重复骚扰。
+ask_cdt_site() {
+  [ "$CDT_SITE_ASKED" = "1" ] && return 0
+  CDT_SITE_ASKED=1
+
+  printf "\n${BOLD}--- 阿里云账号归属 ---${RESET}\n"
+  printf "你的阿里云账号是在哪个站注册的？\n"
+  printf "  · ${CYAN}国内站${RESET}（aliyun.com，绝大多数用户）—— 直接回车\n"
+  printf "  · ${CYAN}国际站${RESET}（alibabacloud.com）—— 输入国际站的 CDT 查询端点\n"
+  printf "    （不确定就留空用默认，配完发现数字不对再改）\n"
+  local answer=""
+  read -r -p "   端点（直接回车用默认）： " answer
+  answer="$(printf '%s' "$answer" | tr -d '[:space:]')"
+
+  if [ -n "$answer" ]; then
+    # 形态校验：只允许域名字符（小写字母/数字/点/短横线），
+    # 防手滑把路径或命令片段写进配置（这个值会进 JSON 并参与 URL 拼接）。
+    # 空串已由上面的 [ -n ] 挡掉，这里只需要挡「含非法字符」。
+    case "$answer" in
+      *[!a-z0-9.-]*)
+        err "「$answer」不像一个端点域名，已按默认（国内站）处理。"
+        CDT_ENDPOINT_OPT=""
+        ;;
+      *)
+        CDT_ENDPOINT_OPT="$answer"
+        ok "已记下 CDT 查询端点：$answer"
+        ;;
+    esac
+  else
+    info "使用默认端点（国内站 cdt.aliyuncs.com）。"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # 询问一台机器（把结果追加进临时 JSON）
 # ---------------------------------------------------------------------------
 # 参数：
@@ -367,7 +422,7 @@ ask_one_machine() {
   #    从根上杜绝这一类问题。
   local json_line
   json_line="$(NAME="$name" INSTANCE_ID="$instance_id" REGION="$region" \
-      AK="$ak" SK="$sk" LIMIT="$limit" node -e '
+      AK="$ak" SK="$sk" LIMIT="$limit" CDT_ENDPOINT="$CDT_ENDPOINT_OPT" node -e '
     const payload = {
       name: process.env.NAME,
       instance_id: process.env.INSTANCE_ID,
@@ -375,6 +430,8 @@ ask_one_machine() {
       ak: process.env.AK,
       sk: process.env.SK,
       traffic_limit: Number(process.env.LIMIT),
+      // CDT 查询端点覆盖：空 = 国内站默认。只有国际站账号才会填。
+      cdt_endpoint: process.env.CDT_ENDPOINT || "",
       paused: false,
     };
     process.stdout.write(JSON.stringify(payload));
@@ -570,6 +627,11 @@ run_configure() {
   fi
 
   : > "$TEMP_JSON"
+
+  # ---- 账号归属（国内站 / 国际站）----
+  # 必须在这里问：问到的端点要写进后面每台机器的 JSON。
+  # 绝大多数用户直接回车（国内站默认），不会被打扰。
+  ask_cdt_site
 
   # ---- Telegram 数字 ID ----
   step "你的 Telegram 数字 ID"
@@ -777,6 +839,9 @@ run_add_account() {
 
   # ---- 4. 逐台填（自动带好新账号的 AK/SK）----
   : > "$TEMP_JSON"
+  # 新账号可能和现有账号不同站（比如现有的是国内站、新加的是国际站），
+  # 所以这里也问一次（同一会话内只问一次，由 CDT_SITE_ASKED 记忆）。
+  ask_cdt_site
   local added=0 index=1
   while true; do
     if ask_one_machine "$index" "$ak" "$sk"; then

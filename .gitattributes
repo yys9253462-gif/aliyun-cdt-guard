@@ -3,5 +3,10 @@
 *.sh    text eol=lf
 *.py    text eol=lf
 *.md    text eol=lf
+# JS/MJS 同理：Workers 代码与测试跑在 Node/Linux 上，
+# 且本机 PortableGit 的 autocrlf=true 会把 .js 检出成 CRLF，
+# 不钉 eol=lf 的话每次在 Windows 上编辑都会染上一次行尾噪音。
+*.js    text eol=lf
+*.mjs   text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf

@@ -15,10 +15,26 @@ import { signAliyunRpc, makeNonce, makeTimestamp } from './aliyun-sign.js';
 // ---------------------------------------------------------------------------
 // 常量（与 Python 版保持一致）
 // ---------------------------------------------------------------------------
-const CDT_ENDPOINT = 'cdt.aliyuncs.com';
 const CDT_VERSION = '2021-08-13';
 // CDT 接口固定走杭州接入点，某些海外地域直连会卡死 —— 这是实测结论
 const CDT_REGION = 'cn-hangzhou';
+
+/**
+ * CDT 接口端点（默认国内站）。
+ *
+ * 国内站账号（aliyun.com 注册）用 cdt.aliyuncs.com。
+ * **国际站账号**（alibabacloud.com 注册、在国际站控制台购买的机器）的
+ * CDT 计量数据在国际站体系，国内站端点查出来的数可能对不上或查不到。
+ *
+ * 所以端点做成**可覆盖**：每台机器的配置里可带 `cdt_endpoint` 字段
+ * （见 worker/README.md「国际站账号」一节），为空时用这里的默认值。
+ *
+ * ⚠️ 国际站的 CDT API 端点域名没有权威文档坐实，**不写死在这里当默认**，
+ *    也不在代码里猜测 —— 由用户按自己的账号归属显式填写。
+ *    这也是「单位/口径未经验证不得下结论」那条铁律的延伸：
+ *    没证据的域名写进代码，比不写更危险。
+ */
+const CDT_ENDPOINT_DEFAULT = 'cdt.aliyuncs.com';
 
 const ECS_VERSION = '2014-05-26';
 
@@ -48,9 +64,20 @@ export const BSS_ENDPOINTS = [
 ];
 
 /**
- * CDT 免费额度（按账号统一计算，各产品共享）
+ * CDT 免费额度（按账号 + 地域池计算，各产品共享）
  *
- * 中国内地地域 20 GB/月 + 非中国内地地域 200 GB/月
+ * 口径来源（阿里云官方帮助中心，2026-10-12 在线核实）：
+ *   https://help.aliyun.com/document_detail/2881551.html
+ *   自 2025-06-01 起，CDT 公网流量免费额度为 220 GB/月，其中：
+ *     · 中国内地地域     20 GB/月
+ *     · 非中国内地地域  200 GB/月
+ *   两个池**按地域分别累计、互不占用**（国际站文档同口径：
+ *   https://intl.aliyun.com/help/en/cdt/product-overview/what-is-cdt/）。
+ *
+ * 🔴 常见误读（曾经在这个项目里引起过虚警）：
+ *    官网宣传的「220GB」是**两池合计**，不是单池额度。
+ *    海外机器能用的就是 200GB，「还剩 220-已用」是算错的。
+ *    反过来也不行 —— 别把单池的 200 当合计，那会漏算内地池。
  *
  * ⚠️ 这是「免费」额度，不是计费阶梯上界。
  *    接口返回的 HighestTraffic（10TiB）是第一档计费阶梯的上界，与免费无关，
@@ -58,6 +85,27 @@ export const BSS_ENDPOINTS = [
  */
 export const FREE_QUOTA_MAINLAND_GB = 20.0;
 export const FREE_QUOTA_OVERSEAS_GB = 200.0;
+
+/**
+ * CDT 用量明细的分页参数。
+ *
+ * 🔴 原来写死 PageSize: 50 且**不翻页**：
+ *    账号下接入 CDT 的云产品越多，明细条目越多
+ *    （ECS + EIP + SLB + CEN + IPv6 网关…每产品每地域都可能是一条），
+ *    第 50 条以后的数据被静默丢弃，统计出的账号总量**偏小**。
+ *    偏小不报错、不崩溃，只会让「额度剩余」虚高 ——
+ *    用户以为还安全，其实早就开始在扣钱了。最坑的一类 bug。
+ *
+ * 翻页有成本：每页 = 1 次阿里云调用 = 1 个子请求
+ * （免费版单请求上限 50，见下方 SUBREQUEST_BUDGET 的说明）。
+ * 所以设两道闸：
+ *   · 单页 100 条（接口 PageSize 上限，100 是实测可用值）
+ *   · 最多 10 页（1000 条明细）—— 正常账号远到不了这个量级；
+ *     真到了说明账号极大，该考虑拆 AK 了。闸门保住子请求预算，
+ *     不让翻页把整轮巡检打爆。
+ */
+const CDT_PAGE_SIZE = 100;
+const CDT_MAX_PAGES = 10;
 
 // 亚太大区前缀（非中国内地）
 const OVERSEAS_PREFIXES = ['ap-', 'us-', 'eu-', 'me-', 'na-', 'sa-', 'cn-hongkong'];
@@ -305,27 +353,108 @@ export function getFreeQuotaGb(region) {
 // ---------------------------------------------------------------------------
 
 /**
- * 查询账号当月 CDT 公网出流量，单位 GB。
+ * 分页拉全账号本月的 CDT 公网出流量明细。
  *
  * ⚠️ 接口返回的是**整个账号**的用量，不是单台实例的用量。
  *    同一账号下多台机器只能查一次，把每台的结果相加会重复计算 N 倍。
+ *
+ * 返回 { totalBytes, tierMaxBytes, pages }：
+ *   totalBytes   全部明细的流量字节数之和
+ *   tierMaxBytes 第一档计费阶梯上界（仅供了解计费结构，不是免费量）
+ *   pages        实际翻了几页（日志与测试用）
+ *
+ * 翻页与预算的权衡见 CDT_PAGE_SIZE / CDT_MAX_PAGES 的注释。
  */
-export async function getCdtTrafficGb(accessKeyId, accessKeySecret) {
-  const result = await requestWithRetry({
-    accessKeyId,
-    accessKeySecret,
-    endpoint: CDT_ENDPOINT,
-    action: 'ListCdtInternetTraffic',
-    version: CDT_VERSION,
-    params: { PageSize: '50' },
-  });
-  const data = unwrap(result, '查询 CDT 流量');
-
+async function fetchAllCdtTrafficDetails(accessKeyId, accessKeySecret, endpoint) {
   let totalBytes = 0;
-  for (const item of data.TrafficDetails || []) {
-    totalBytes += Number(item.Traffic || 0);
+  let tierMaxBytes = 0;
+  let pages = 0;
+
+  for (let pageNumber = 1; ; pageNumber += 1) {
+    const result = await requestWithRetry({
+      accessKeyId,
+      accessKeySecret,
+      endpoint,
+      action: 'ListCdtInternetTraffic',
+      version: CDT_VERSION,
+      params: {
+        PageSize: String(CDT_PAGE_SIZE),
+        PageNumber: String(pageNumber),
+      },
+    });
+    const data = unwrap(result, '查询 CDT 流量');
+
+    const details = data.TrafficDetails || [];
+    for (const item of details) {
+      totalBytes += Number(item.Traffic || 0);
+      for (const tier of item.TrafficTierDetails || []) {
+        const highest = Number((tier && tier.HighestTraffic) || 0);
+        if (highest > tierMaxBytes) {
+          tierMaxBytes = highest;
+        }
+      }
+    }
+    pages += 1;
+
+    // 停止条件：这页没满（没有更多了）或到达页数上限。
+    // 两者都命中时以先到者为准。
+    if (details.length < CDT_PAGE_SIZE || pages >= CDT_MAX_PAGES) {
+      break;
+    }
   }
-  return totalBytes / (1024 ** 3);
+
+  return { totalBytes, tierMaxBytes, pages };
+}
+
+/**
+ * 流量查询的**请求级去重缓存**（与下方 balanceCacheByAk 同一套哲学）。
+ *
+ * 为什么需要它：
+ *     一次巡检/一次菜单查询里，同一个 AK 会被查多次：
+ *       · guard.js 的 checkOne —— 每台机器各查一次（同 AK 多台 = 重复查）
+ *       · views.js 的 buildTraffic / buildBalance / buildReport
+ *     而 CDT 接口返回的是**账号级**总量 —— 同一个 AK 查多少次都是同一个数。
+ *     不缓存时，同 AK 3 台机器一轮就查 3 次，白白消耗子请求预算
+ *     （免费版单请求上限 50，机器一多/接口一抖很容易撞上，见 B5）。
+ *
+ * 为什么缓存 key 要带 endpoint：
+ *     国内站与国际站是不同的计量体系，同一个 AK 在两个端点查出来的
+ *     可能不是同一个数，不能互相顶包。
+ *
+ * 生命周期：模块级 Map，一次请求内有效（Worker 每次请求是独立执行环境），
+ * 与 balanceCacheByAk 相同，不需要手动清理。
+ *
+ * 只缓存成功值；失败不缓存 —— 网络抖动是暂时的，同 AK 的下一台机器
+ * 再试一次很可能就好了（与余额的「失败也缓存」略有不同：
+ * 余额失败时要依次试 3 个端点，重试代价高；流量失败就是单端点重试，
+ * 且 checkOne 的调用方对失败已有完整处理）。
+ */
+const trafficCacheByAk = new Map();
+
+/** 清空流量缓存。测试用，也可在需要强制刷新时调用。 */
+export function clearTrafficCache() {
+  trafficCacheByAk.clear();
+}
+
+/**
+ * 查询账号当月 CDT 公网出流量，单位 GB。
+ *
+ * @param {string} endpoint 可选，覆盖 CDT 端点（国际站账号用）。
+ *        为空时用默认国内站端点。
+ */
+export async function getCdtTrafficGb(accessKeyId, accessKeySecret, endpoint = '') {
+  const ep = String(endpoint || '').trim() || CDT_ENDPOINT_DEFAULT;
+  const cacheKey = `${String(accessKeyId || '')}|${ep}`;
+  if (trafficCacheByAk.has(cacheKey)) {
+    return trafficCacheByAk.get(cacheKey);
+  }
+
+  const { totalBytes } = await fetchAllCdtTrafficDetails(
+    accessKeyId, accessKeySecret, ep
+  );
+  const value = totalBytes / (1024 ** 3);
+  trafficCacheByAk.set(cacheKey, value);
+  return value;
 }
 
 /**
@@ -334,27 +463,24 @@ export async function getCdtTrafficGb(accessKeyId, accessKeySecret) {
  * 返回 { trafficGb, freeGb, tierMaxGb, overFree }
  *   tierMaxGb 是第一档阶梯上界（GB，仅供了解计费结构，不是免费量）
  */
-export async function getCdtTrafficDetail(accessKeyId, accessKeySecret, region) {
-  const result = await requestWithRetry({
-    accessKeyId,
-    accessKeySecret,
-    endpoint: CDT_ENDPOINT,
-    action: 'ListCdtInternetTraffic',
-    version: CDT_VERSION,
-    params: { PageSize: '50' },
-  });
-  const data = unwrap(result, '查询 CDT 流量明细');
+export async function getCdtTrafficDetail(accessKeyId, accessKeySecret, region, endpoint = '') {
+  const ep = String(endpoint || '').trim() || CDT_ENDPOINT_DEFAULT;
+  const cacheKey = `${String(accessKeyId || '')}|${ep}`;
 
-  let totalBytes = 0;
-  let tierMaxBytes = 0;
-  for (const item of data.TrafficDetails || []) {
-    totalBytes += Number(item.Traffic || 0);
-    for (const tier of item.TrafficTierDetails || []) {
-      const highest = Number((tier && tier.HighestTraffic) || 0);
-      if (highest > tierMaxBytes) {
-        tierMaxBytes = highest;
-      }
-    }
+  let totalBytes;
+  let tierMaxBytes;
+  if (trafficCacheByAk.has(cacheKey)) {
+    // 命中了 getCdtTrafficGb 的缓存 —— 只拿到总量，没有阶梯明细。
+    // 阶梯上界不是关键信息，缺失时置 0（调用方只做展示，不做判断）。
+    totalBytes = trafficCacheByAk.get(cacheKey) * (1024 ** 3);
+    tierMaxBytes = 0;
+  } else {
+    const fetched = await fetchAllCdtTrafficDetails(
+      accessKeyId, accessKeySecret, ep
+    );
+    totalBytes = fetched.totalBytes;
+    tierMaxBytes = fetched.tierMaxBytes;
+    trafficCacheByAk.set(cacheKey, totalBytes / (1024 ** 3));
   }
 
   const trafficGb = totalBytes / (1024 ** 3);

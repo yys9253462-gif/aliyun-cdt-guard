@@ -109,13 +109,17 @@ export function quotaForGroup(members) {
  *
  * 粒度说明（这是本模块最需要注意的地方）：
  *     CDT 的查询接口返回的是**整个账号**的用量，不是单台实例的用量。
- *     所以对同一账号下的多台机器，我们只查一次，然后把这份总量记在
- *     账号组上，**不要**去把每台机器的查询结果相加 —— 那会重复计算 N 倍。
+ *    所以对同一账号下的多台机器，我们只查一次，然后把这份总量记在
+ *    账号组上，**不要**去把每台机器的查询结果相加 —— 那会重复计算 N 倍。
+ *
+ * endpoint：该账号的 CDT 查询端点（国际站账号可覆盖，为空 = 国内站默认）。
+ *     从组内第一台机器取 —— 同组机器理论上同站，若真混了，
+ *     以第一台为准（查询结果本身也是账号级的，与单台无关）。
  */
 async function trafficForGroup(ak, sk, members) {
-  const region = members?.length ? members[0]?.region || '' : '';
+  const endpoint = String(members?.[0]?.cdt_endpoint || '').trim();
   try {
-    const value = await getCdtTrafficGb(ak, sk, region);
+    const value = await getCdtTrafficGb(ak, sk, endpoint);
     return { trafficGb: value, error: null };
   } catch (error) {
     return { trafficGb: -1.0, error };
@@ -216,6 +220,19 @@ export async function buildSummaryText(config) {
 
     const used = info.trafficGb;
     lines.push(`  账号本月总用量: ${used.toFixed(2)} GB`);
+    lines.push('  （账号级计量：含该账号全部地域、全部云产品的公网出流量）');
+
+    // 🔴 混合地域账号的特殊说明（内地 + 非内地机器同时存在）：
+    //     CDT 接口只给账号**总量**，不给分池拆分 —— 拿总量分别跟
+    //     内地 20GB / 海外 200GB 两个池比，两个数字都是错的
+    //     （内地用量会被算进海外池的消耗里）。
+    //     这时必须明说「拆不出来」，让用户去看控制台，
+    //     而不是给他两个看着精确、其实全错的钱数。
+    if (info.mainlandFree > 0 && info.overseasFree > 0) {
+      lines.push('  ⚠️ 该账号同时含有内地与非内地机器，接口只返回合计用量，');
+      lines.push('     无法拆出两个池各自的消耗，下面的分池数字不准确，');
+      lines.push('     请以阿里云控制台「云数据传输」页面的数据为准。');
+    }
 
     // 按池子分别展示：内地池 / 非内地池
     if (info.overseasFree > 0) {

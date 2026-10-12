@@ -571,7 +571,10 @@ async function checkOne(env, user, config, state, logger, collector) {
   }
 
   try {
-    const trafficGb = await api.getCdtTrafficGb(ak, sk);
+    // 第三参传 CDT 端点（国际站账号可覆盖，为空 = 国内站默认）。
+    // 同一个 AK 的多台机器在一轮里只会真正查一次 —— aliyun-api 里
+    // 有按 AK+端点的请求级缓存（账号级数据，重复查纯属浪费预算）。
+    const trafficGb = await api.getCdtTrafficGb(ak, sk, user.cdt_endpoint || '');
     const status = await api.getInstanceStatus(ak, sk, region, instanceId);
 
     if (status === null) {

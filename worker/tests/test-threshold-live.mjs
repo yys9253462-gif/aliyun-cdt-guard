@@ -5,6 +5,7 @@
  * （region=ap-southeast-6, traffic_limit=180）跑完整边界序列。
  */
 import { parseTrafficLimit, checkOne } from '../src/guard.js';
+import { clearTrafficCache } from '../src/aliyun-api.js';
 
 let pass = 0, fail = 0;
 const check = (n, c, e = '') => {
@@ -23,6 +24,12 @@ const LIVE = {
 };
 
 function makeFetch(trafficGb, status) {
+  // 清空流量查询的请求级缓存。
+  // 真实 Worker 里每个请求是独立执行环境，缓存天然隔离；
+  // 但测试全在同一个 node 进程里，不清就会串 —— 下一个用例会命中
+  // 上一个用例缓存的流量值，「正好等于阈值必须关机」直接变不关机。
+  // 约定：每次重建 mock = 模拟新一轮巡检。
+  clearTrafficCache();
   return async (url, init) => {
     const params = new URLSearchParams(init?.body || '');
     const action = params.get('Action') || 'Unknown';

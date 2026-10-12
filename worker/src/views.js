@@ -13,7 +13,9 @@
 
 import * as api from './aliyun-api.js';
 import * as common from './common.js';
-import { buildSummaryText } from './account-summary.js';
+import {
+  buildSummaryText, groupByAccount, quotaForGroup, maskAk,
+} from './account-summary.js';
 import { regionDisplayWithCode } from './region-names.js';
 
 const STATUS_CN = { Running: '运行中', Stopped: '已停止' };
@@ -66,46 +68,123 @@ export async function buildStatus(config) {
 // ---------------------------------------------------------------------------
 // 流量与额度
 // ---------------------------------------------------------------------------
+/**
+ * 流量与免费额度页。
+ *
+ * 🔴 2026-10-12 重写：从「逐台展示」改为「按账号分组展示」。
+ *
+ * 为什么必须改（老写法有三个叠加的错）：
+ *   1. CDT 查询接口（ListCdtInternetTraffic）返回的是**账号级**总用量，
+ *      不是单台实例的用量。老写法让每台机器各查一次、各显示一次，
+ *      同一个 AK 下 3 台机器就显示 3 个一模一样的「已用」——
+ *      用户会以为那是每台各自的用量（其实三台加起来也没那么多）。
+ *   2. 免费额度是「账号 + 地域池」口径（内地 20 / 非内地 200，
+ *      两池分别累计）。老写法拿账号总量跟单台机器所在池的额度比，
+ *      账号下混有内地机器时，海外池的「剩余」被内地用量污染，数字全错。
+ *   3. 没有告知数据时效。CDT 按小时出账（官方：账单默认 6 小时内出账），
+ *      用户看到旧数字以为系统没更新。
+ *
+ * 新写法与「🏦 账号汇总」页同一套口径（复用 account-summary 的分组）：
+ *   · 按 AK 分组，一组只查一次（aliyun-api 里还有请求级缓存兜底）；
+ *   · 显示账号本月总用量，并注明「账号级计量」；
+ *   · 纯单池账号才显示「剩余」——那种情况下总量确实全部来自该池，
+ *      减法是对的；混合地域账号明确告知「接口拆不出分池用量」，
+ *      不给错误数字，让用户看控制台；
+ *   · 机器降级为组内的列表行，只提供地域与阈值信息；
+ *   · 页尾注明 CDT 的出账延迟。
+ */
 export async function buildTraffic(config) {
   const users = config?.users || [];
   if (!users.length) return '当前没有配置任何机器。';
 
   const lines = ['流量与免费额度', ''];
-  for (const user of users) {
-    const name = common.sanitize(user?.name || user?.instance_id);
-    const region = user?.region || '';
-    const limit = Number(user?.traffic_limit ?? 180);
 
-    if (user?.paused) {
-      lines.push(`\u00b7 ${name}`);
-      lines.push('  监控: 已暂停');
+  for (const { ak, members } of groupByAccount(users)) {
+    const sk = String(members[0]?.sk || '').trim();
+    const endpoint = String(members[0]?.cdt_endpoint || '').trim();
+
+    // 组头：打码 AK + 台数
+    lines.push(`\u00b7 账号 ${maskAk(ak)}（${members.length} 台机器）`);
+
+    const active = members.filter((u) => !u?.paused);
+    if (!active.length) {
+      lines.push('  全部已暂停，未查询用量。');
+      lines.push('');
       continue;
     }
 
-    let traffic;
+    // 账号级总用量（一组只查一次）
+    let trafficGb;
     try {
-      traffic = await api.getCdtTrafficGb(user.ak, user.sk, region);
+      trafficGb = await api.getCdtTrafficGb(ak, sk, endpoint);
     } catch (error) {
-      lines.push(`\u00b7 ${name}`);
       lines.push(`  查询失败: ${common.sanitize(error)}`);
+      lines.push('');
       continue;
     }
 
-    const freeGb = api.getFreeQuotaGb(region);
-    const area = api.isOverseasRegion(region) ? '非中国内地' : '中国内地';
-    const remain = freeGb - traffic;
+    lines.push(`  本月已用: ${gb(trafficGb)} GB（账号级计量：含该账号全部地域与产品）`);
 
-    lines.push(`\u00b7 ${name}`);
-    lines.push(`  地域: ${regionDisplayWithCode(region)}`);
-    lines.push(`  已用: ${gb(traffic)} GB / 阈值 ${limit.toFixed(0)} GB`);
-    lines.push(`  免费额度: ${freeGb.toFixed(0)} GB（${area}）`);
-    if (remain >= 0) {
-      lines.push(`  额度剩余: ${gb(remain)} GB`);
+    // 池子构成：该账号占用了哪几个池
+    const { mainland, overseas } = quotaForGroup(members);
+    const mixed = mainland > 0 && overseas > 0;
+
+    if (mixed) {
+      // 混合账号：接口只给合计，拆不出分池消耗 —— 明说，不算错账
+      lines.push('  \u26a0\ufe0f 该账号同时含有内地与非内地机器，接口只返回合计用量，');
+      lines.push('     拆不出两个池各自的消耗，分池剩余暂不显示；');
+      lines.push(`     免费额度: 中国内地 ${mainland.toFixed(0)} GB + `
+        + `非中国内地 ${overseas.toFixed(0)} GB（两池分别累计）`);
+      lines.push('     准确数字请以阿里云控制台「云数据传输」页面为准。');
+    } else if (overseas > 0) {
+      // 纯非内地账号：总量全部来自该池，减法成立
+      const remain = overseas - trafficGb;
+      const percent = (trafficGb / overseas) * 100;
+      if (remain >= 0) {
+        lines.push(
+          `  非中国内地额度: ${overseas.toFixed(0)} GB，`
+          + `已用 ${percent.toFixed(1)}%，剩 ${gb(remain)} GB`
+        );
+      } else {
+        lines.push(
+          `  非中国内地额度: ${overseas.toFixed(0)} GB，`
+          + `已超出 ${gb(-remain)} GB（正在计费）`
+        );
+      }
     } else {
-      lines.push(`  已超出免费额度 ${gb(-remain)} GB，正在产生费用`);
+      // 纯内地账号：同上，但注意内地池只有 20GB，极易超
+      const remain = mainland - trafficGb;
+      const percent = (trafficGb / mainland) * 100;
+      if (remain >= 0) {
+        lines.push(
+          `  中国内地额度: ${mainland.toFixed(0)} GB，`
+          + `已用 ${percent.toFixed(1)}%，剩 ${gb(remain)} GB`
+        );
+      } else {
+        lines.push(
+          `  中国内地额度: ${mainland.toFixed(0)} GB，`
+          + `已超出 ${gb(-remain)} GB（正在计费）`
+        );
+      }
+    }
+
+    // 组内机器列表：只提供地域与阈值（用量是账号级的，不按台分）
+    lines.push('  机器:');
+    for (const user of members) {
+      const name = common.sanitize(user?.name || user?.instance_id);
+      const region = user?.region || '';
+      const limit = Number(user?.traffic_limit ?? 180);
+      const paused = user?.paused ? '（已暂停）' : '';
+      lines.push(
+        `    \u00b7 ${name} [${regionDisplayWithCode(region)}] `
+        + `阈值 ${limit.toFixed(0)} GB${paused}`
+      );
     }
     lines.push('');
   }
+
+  lines.push('提示: CDT 用量按小时计费出账，官方口径账单默认 6 小时内完成，');
+  lines.push('      此处的数字通常滞后 1~6 小时，以阿里云控制台账单为准。');
   return lines.join('\n');
 }
 
@@ -126,6 +205,15 @@ export async function buildBalance(config) {
 
   const lines = ['余额与账单详情', ''];
   const seen = new Map();
+
+  // 混合地域账号名单（同 AK 下同时有内地 + 非内地机器）：
+  // 这种账号的 CDT 总量拆不出分池消耗，逐台展示「剩余」会算错，
+  // 需要在数字旁明说（与 buildTraffic / 账号汇总同一口径）。
+  const mixedAk = new Set();
+  for (const { ak, members } of groupByAccount(users)) {
+    const { mainland, overseas } = quotaForGroup(members);
+    if (mainland > 0 && overseas > 0) mixedAk.add(ak);
+  }
 
   for (const user of users) {
     const name = common.sanitize(user?.name || user?.instance_id);
@@ -198,7 +286,7 @@ export async function buildBalance(config) {
     // 免费额度消耗情况
     let trafficGb = -1;
     try {
-      trafficGb = await api.getCdtTrafficGb(ak, user?.sk || '', region);
+      trafficGb = await api.getCdtTrafficGb(ak, user?.sk || '', user?.cdt_endpoint || '');
     } catch (error) {
       trafficGb = -1;
     }
@@ -207,7 +295,13 @@ export async function buildBalance(config) {
     if (trafficGb >= 0) {
       const remain = freeGb - trafficGb;
       const percent = freeGb > 0 ? (trafficGb / freeGb) * 100 : 0;
-      if (remain >= 0) {
+      if (mixedAk.has(String(ak))) {
+        // 混合账号：总量含另一个池的用量，这个百分比/剩余是失真的
+        lines.push(
+          `  免费额度: 账号合计已用 ${gb(trafficGb)} GB`
+          + `（该账号混合地域，拆不出分池消耗，${area}池准确数字以控制台为准）`
+        );
+      } else if (remain >= 0) {
         lines.push(
           `  免费额度: 已用 ${percent.toFixed(1)}%（${gb(trafficGb)} / ${freeGb.toFixed(0)} GB，${area}）`
         );
@@ -334,6 +428,14 @@ export async function buildReport(config) {
     '',
   ];
 
+  // 混合地域账号名单：报表逐台展示时，这种账号的「剩余」是失真的，
+  // 需要标注（与 buildTraffic / buildBalance / 账号汇总同一口径）。
+  const mixedAk = new Set();
+  for (const { ak, members } of groupByAccount(users)) {
+    const { mainland, overseas } = quotaForGroup(members);
+    if (mainland > 0 && overseas > 0) mixedAk.add(ak);
+  }
+
   for (const user of users) {
     const name = common.sanitize(String(user?.name || '').trim() || user?.instance_id || '未命名');
     const instanceId = String(user?.instance_id || '').trim();
@@ -350,10 +452,10 @@ export async function buildReport(config) {
     const ak = String(user.ak || '').trim();
     const sk = String(user.sk || '').trim();
 
-    // 1. 流量
+    // 1. 流量（账号级计量；同 AK 多台由 aliyun-api 的缓存去重）
     let trafficGb = -1;
     try {
-      trafficGb = await api.getCdtTrafficGb(ak, sk, region);
+      trafficGb = await api.getCdtTrafficGb(ak, sk, user?.cdt_endpoint || '');
     } catch (error) {
       trafficGb = -1;
     }
@@ -417,13 +519,21 @@ export async function buildReport(config) {
     if (trafficGb >= 0) {
       const freeGb = api.getFreeQuotaGb(region);
       const area = api.isOverseasRegion(region) ? '非中国内地' : '中国内地';
-      const remain = freeGb - trafficGb;
-      if (remain >= 0) {
-        lines.push(`  免费额度: ${freeGb.toFixed(0)} GB/月（${area}）→ 免费额度剩 ${gb(remain)} GB`);
-      } else {
+      if (mixedAk.has(ak)) {
+        // 混合账号：账号总量含另一个池的用量，减法失真，只报合计
         lines.push(
-          `  免费额度: ${freeGb.toFixed(0)} GB/月（${area}）→ 已超出 ${gb(-remain)} GB，超出部分开始计费`
+          `  免费额度: 账号本月合计已用 ${gb(trafficGb)} GB`
+          + `（该账号混合地域，${area}池准确消耗以控制台为准）`
         );
+      } else {
+        const remain = freeGb - trafficGb;
+        if (remain >= 0) {
+          lines.push(`  免费额度: ${freeGb.toFixed(0)} GB/月（${area}）→ 免费额度剩 ${gb(remain)} GB`);
+        } else {
+          lines.push(
+            `  免费额度: ${freeGb.toFixed(0)} GB/月（${area}）→ 已超出 ${gb(-remain)} GB，超出部分开始计费`
+          );
+        }
       }
     }
 
