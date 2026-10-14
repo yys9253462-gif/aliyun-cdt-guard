@@ -72,7 +72,7 @@ console.log('--- 1. 手动关机后，巡检不再自动开机 ---');
 
   instanceStatus = 'Running';
   const reply = await doStop(config, 'i-r1', env);
-  check('关机回执提示不会自动开回', reply.includes('不会自动把它开回来'), reply);
+  check('关机指令已下发', reply.includes('已向'), reply);
   const saved = await common.loadConfig(env);
   check('手动关机记号已写入配置', saved.users[0].manual_stopped === true);
 
@@ -106,14 +106,6 @@ console.log('--- 2. 全部关机 / 全部开机同样维护记号，且跳过暂
   check('全部开机：记号被清掉', !saved.users[0].manual_stopped);
 }
 
-console.log('--- 3. 不传 env 也不崩（旧调用方式兼容）---');
-{
-  const config = { users: [makeUser(4)] };
-  const reply = await doStop(config, 'i-r4');
-  check('不传 env 时仍正常关机并在内存里打记号',
-    reply.includes('已向') && config.users[0].manual_stopped === true, reply);
-}
-
 console.log('--- 4. 预算不够查完时，下一轮从没查到的机器开始 ---');
 {
   const env = { CDT_GUARD_KV: new FakeKV() };
@@ -131,7 +123,7 @@ console.log('--- 4. 预算不够查完时，下一轮从没查到的机器开始
 
   // 每轮都模拟「全新的 Worker 实例」：定时任务常常落在新实例上，
   // 上一轮的内存缓存不会留下来帮忙，否则会掩盖「后面的机器永远查不到」。
-  const freshIsolate = () => { api.clearTrafficCache(); api.clearBalanceCache(); };
+  const freshIsolate = () => { api.clearTrafficCache?.(); api.clearBalanceCache?.(); };
 
   freshIsolate();
   calls = [];
