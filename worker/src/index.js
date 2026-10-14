@@ -1,6 +1,6 @@
 import { handleUpdate } from './bot-listener.js';
-import { loadConfig, nowLocal, redact } from './common.js';
-import { runInspection } from './guard.js';
+import { loadConfig, loadState, nowLocal, redact } from './common.js';
+import { heartbeatSummary, runInspection } from './guard.js';
 import { withRequestContext } from './request-context.js';
 import { getWebhookInfo, registerCommands, sendText, setWebhook } from './telegram.js';
 import { buildReport } from './views.js';
@@ -130,7 +130,12 @@ Webhook 路径已在 /setup 里给出。`
         console.log("[cron] 缺少机器人令牌或 Chat ID，跳过日报");
         return;
       }
-      const content = await buildReport(config);
+      let content = await buildReport(config);
+      try {
+        content += `\n\n${heartbeatSummary(await loadState(env)).text}`;
+      } catch (error) {
+        content += "\n\n巡检心跳: 读取失败（状态存储异常）";
+      }
       await sendText(token, chatId, content);
       console.log("[cron] 日报已发送");
     } catch (error) {

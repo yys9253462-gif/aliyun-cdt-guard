@@ -1,5 +1,5 @@
 import { getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceStatus, isOverseasRegion, isSubrequestBudgetExhausted, resetSubrequestCount, startInstance, stopInstance } from './aliyun-api.js';
-import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, appendTrafficHistoryBatch, bumpCounter, clearCounter, eventAllowed, formatMoney, loadConfig, loadState, markEvent, nowSeconds, redact, sanitize, saveState } from './common.js';
+import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, appendTrafficHistoryBatch, bumpCounter, clearCounter, eventAllowed, formatMoney, formatDate, loadConfig, loadState, markEvent, nowLocal, nowSeconds, redact, sanitize, saveState } from './common.js';
 import { ERR_CREDENTIAL, classifyError } from './credential-error.js';
 import { sleep, throwIfCancelled, withOperationSignal } from './request-context.js';
 import { sendAlert } from './telegram.js';
@@ -213,8 +213,24 @@ async function tryStart(user, config, state, name, key, trafficGb, logger) {
 async function enforceStop(user, config, state, name, key, trafficGb, status, limitGb, logger) {
   if (status === "Running") {
     logger(`[${name}] 流量超标 ${trafficGb.toFixed(2)}GB / 阈值 ${limitGb.toFixed(0)}GB，正在强制关机`);
+    // 上一轮已经下发过关机，这一轮查到还在 Running：关机没生效，必须告警
+    const record = state[key] || (state[key] = {});
+    if (record.stop_sent_at) {
+      const mins = Math.max(1, Math.round((nowSeconds() - Number(record.stop_sent_at)) / 60));
+      logger(`[${name}] ${mins} 分钟前已下发关机，但实例仍在运行，再次下发`);
+      if (eventAllowed(state, key, "stop_ineffective")) {
+        const msg = `机器: ${sanitize(name)}
+当前流量: ${trafficGb.toFixed(2)}GB (阈值 ${limitGb.toFixed(0)}GB)
+${mins} 分钟前已经下发了关机指令，但实例仍然是「运行中」。
+脚本会每 5 分钟继续重试；请尽快登录阿里云控制台确认并手动关机。`;
+        if (await sendAlert(config, "关机未生效", msg, "danger", logger)) {
+          markEvent(state, key, "stop_ineffective");
+        }
+      }
+    }
     try {
       await stopInstance(user.ak, user.sk, user.region, user.instance_id);
+      if (!record.stop_sent_at) record.stop_sent_at = nowSeconds();
     } catch (error) {
       logger(`[${name}] 关机指令下发失败: ${redact(error.message)}`);
       if (eventAllowed(state, key, "stop_failed")) {
@@ -231,7 +247,7 @@ async function enforceStop(user, config, state, name, key, trafficGb, status, li
     if (eventAllowed(state, key, "overlimit", OVERLIMIT_COOLDOWN)) {
       const msg = `机器: ${sanitize(name)}
 当前流量: ${trafficGb.toFixed(2)}GB (阈值 ${limitGb.toFixed(0)}GB)
-动作: 已强制关机止损`;
+动作: 已下发关机指令（下一轮巡检会确认是否真的停了）`;
       if (await sendAlert(config, "流量超标已止损", msg, "danger", logger)) {
         markEvent(state, key, "overlimit");
       }
@@ -280,6 +296,44 @@ async function remindPausedOverLimit(user, config, state, name, key, logger) {
 如果不是有意为之，请在「单机操作」里点「▶️ 恢复监控」。`;
   if (await sendAlert(config, "已暂停的机器流量超标", msg, "warn", logger)) {
     markEvent(state, eventKey, "paused_over");
+  }
+}
+// 记录流量采样并估算最近的增长速度（GB/小时）。
+// 每 30 分钟最多记一个点、只保留最近 SURGE_WINDOW_HOURS 小时；跨月清零（流量回落）时重新开始。
+// 跟着本轮 state 一起保存，不额外占用写入次数。
+function trackTrafficRate(state, key, trafficGb, now = nowSeconds()) {
+  const sampleKey = `${key}:samples`;
+  let samples = Array.isArray(state[sampleKey]) ? state[sampleKey] : [];
+  const last = samples[samples.length - 1];
+  if (last && trafficGb < last[1]) samples = [];
+  if (!last || now - last[0] >= SURGE_SAMPLE_INTERVAL || trafficGb < last[1]) {
+    samples.push([now, Math.round(trafficGb * 1e3) / 1e3]);
+  }
+  samples = samples.filter(([ts]) => now - ts <= SURGE_WINDOW_HOURS * 3600);
+  state[sampleKey] = samples;
+  const oldest = samples[0];
+  const hours = oldest ? (now - oldest[0]) / 3600 : 0;
+  if (hours < SURGE_MIN_SPAN_HOURS) return null;
+  return { rateGbPerHour: (trafficGb - oldest[1]) / hours, hours };
+}
+// 流量突增预警：阿里云的流量数据滞后 1~6 小时，阈值反应不过来。
+// 按最近的增长速度推算「滞后时间内」会不会冲过免费额度，会的话提前告警（不自动关机）。
+async function checkSurge(config, state, name, key, trafficGb, region, limitGb, logger) {
+  const rate = trackTrafficRate(state, key, trafficGb);
+  if (!rate || rate.rateGbPerHour < SURGE_MIN_RATE_GB_PER_HOUR) return;
+  const freeGb = getFreeQuotaGb(region);
+  const projected = trafficGb + rate.rateGbPerHour * SURGE_LAG_HOURS;
+  if (projected < Math.min(freeGb, limitGb)) return;
+  logger(`[${name}] 流量增长 ${rate.rateGbPerHour.toFixed(1)}GB/小时，${SURGE_LAG_HOURS} 小时后约 ${projected.toFixed(0)}GB`);
+  const eventKey = `${key}:surge`;
+  if (!eventAllowed(state, eventKey, "surge", SURGE_COOLDOWN)) return;
+  const msg = `机器: ${sanitize(name)}
+当前流量: ${trafficGb.toFixed(2)}GB (阈值 ${limitGb.toFixed(0)}GB，免费额度 ${freeGb.toFixed(0)}GB)
+最近 ${rate.hours.toFixed(1)} 小时增长约 ${rate.rateGbPerHour.toFixed(1)} GB/小时
+阿里云流量数据通常滞后 1~${SURGE_LAG_HOURS} 小时，按这个速度实际用量可能已接近 ${projected.toFixed(0)}GB。
+等数字显示超标再关机可能来不及；如果不是预期中的大流量，建议现在手动关机或调低阈值。`;
+  if (await sendAlert(config, "流量突增预警", msg, "warn", logger)) {
+    markEvent(state, eventKey, "surge");
   }
 }
 async function handleCheckFailure(state, config, name, key, error, logger) {
@@ -400,7 +454,10 @@ async function checkOne(env, user, config, state, logger, collector) {
     if (collector) {
       collector.push({ instanceId, name, trafficGb });
     }
+    if (status === "Stopped" && state[key]) delete state[key].stop_sent_at;
     if (trafficGb < limitGb) {
+      if (state[key]) delete state[key].stop_sent_at;
+      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger);
       if (status === "Stopped" && user.manual_stopped) {
         logger(`[${name}] 用户手动停机，保持停止，不自动开机`);
       } else if (status === "Stopped") {
@@ -470,6 +527,56 @@ async function clearInspectionHealth(env) {
   } catch (_) {
   }
 }
+// 心跳：按小时记录巡检次数，日报里报「过去 24 小时巡检了几次」。
+// Worker 整个不跑了它自己没法告警，所以把次数摆到日报里；次数偏少就说明有问题。
+function hourBucket(date = nowLocal()) {
+  return `${formatDate(date)}T${String(date.getUTCHours()).padStart(2, "0")}`;
+}
+function recordHeartbeat(state) {
+  const hours = state.run_hours && typeof state.run_hours === "object" ? state.run_hours : {};
+  const bucket = hourBucket();
+  hours[bucket] = Number(hours[bucket] || 0) + 1;
+  if (!state.heartbeat_since) state.heartbeat_since = nowSeconds();
+  const keep = Object.keys(hours).sort().slice(-HEARTBEAT_KEEP_HOURS);
+  state.run_hours = Object.fromEntries(keep.map((k) => [k, hours[k]]));
+}
+function heartbeatSummary(state, now = nowLocal()) {
+  const hours = state && state.run_hours || {};
+  let count = 0;
+  for (let i = 0; i < 24; i += 1) {
+    count += Number(hours[hourBucket(new Date(now.getTime() - i * 3600 * 1e3))] || 0);
+  }
+  // 刚开始统计时不足 24 小时，按已统计的时长折算应有次数，避免部署后第一份日报误报「偏少」
+  const since = Number(state && state.heartbeat_since || 0);
+  const elapsedHours = since ? Math.max(0, (now.getTime() - (since * 1e3 + 8 * 3600e3)) / 3600e3) : 24;
+  const expected = Math.round(12 * Math.min(24, elapsedHours));
+  const ok = count >= expected * 0.8;
+  if (elapsedHours < 24) {
+    return {
+      count,
+      ok,
+      text: (ok ? "巡检心跳" : "⚠️ 巡检心跳偏少") + `: 统计开始 ${elapsedHours.toFixed(1)} 小时，已巡检 ${count} 次（应约 ${expected} 次）`
+    };
+  }
+  return {
+    count,
+    ok,
+    text: ok
+      ? `巡检心跳: 过去 24 小时巡检 ${count} 次（正常约 ${expected} 次）`
+      : `⚠️ 巡检心跳偏少: 过去 24 小时只巡检了 ${count} 次（正常约 ${expected} 次），请到 Cloudflare 仪表盘检查定时任务与日志`
+  };
+}
+// 可选：配置了 HEARTBEAT_URL（例如 healthchecks.io 的地址）就在每轮巡检成功后访问一次，
+// 长时间收不到时由对方通知你 —— 这样连 Worker 整个停了也能知道。失败不影响巡检。
+async function pingHeartbeat(env, logger) {
+  const url = String(env && env.HEARTBEAT_URL || "").trim();
+  if (!/^https:\/\//.test(url)) return;
+  try {
+    await fetch(url, { method: "GET", signal: AbortSignal.timeout(5e3) });
+  } catch (error) {
+    logger(`心跳上报失败: ${redact(error && error.message)}`);
+  }
+}
 async function runInspection(env, options = {}) {
   const logger = makeLogger("巡检");
   const lockKey = MANUAL_INSPECTION_LOCK;
@@ -508,8 +615,10 @@ async function runInspection(env, options = {}) {
       checked += 1;
     }
     state.inspection_cursor = (cursor + checked) % users.length;
+    recordHeartbeat(state);
     await saveState(env, state);
     await appendTrafficHistoryBatch(env, collector);
+    await pingHeartbeat(env, logger);
     await clearInspectionHealth(env);
     logger(`巡检结束（已检查 ${checked}/${users.length} 台）`);
     return { ok: true, checked, partial: budgetHit || timedOut, total: users.length };
@@ -519,7 +628,7 @@ async function runInspection(env, options = {}) {
     return { ok: false, error: String(error && error.message) };
   }
 }
-var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW, INSPECTION_HEALTH_KEY, INSPECTION_FAIL_ALERT_THRESHOLD;
+var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW, INSPECTION_HEALTH_KEY, INSPECTION_FAIL_ALERT_THRESHOLD, SURGE_SAMPLE_INTERVAL, SURGE_WINDOW_HOURS, SURGE_MIN_SPAN_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, SURGE_LAG_HOURS, SURGE_COOLDOWN, HEARTBEAT_KEEP_HOURS;
 MAX_START_FAILURES = 3;
 RESOURCE_RETRY_COOLDOWN = 1800;
 CHECK_FAILURE_ALERT_THRESHOLD = 3;
@@ -531,5 +640,12 @@ MANUAL_INSPECTION_LOCK = "manual_inspection_lock";
 INSPECTION_LOCK_WINDOW = 180;
 INSPECTION_HEALTH_KEY = "inspection_health";
 INSPECTION_FAIL_ALERT_THRESHOLD = 3;
+SURGE_SAMPLE_INTERVAL = 1800;
+SURGE_WINDOW_HOURS = 6;
+SURGE_MIN_SPAN_HOURS = 2;
+SURGE_MIN_RATE_GB_PER_HOUR = 1;
+SURGE_LAG_HOURS = 6;
+SURGE_COOLDOWN = 10800;
+HEARTBEAT_KEEP_HOURS = 26;
 
-export { INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
+export { SURGE_LAG_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, checkSurge, heartbeatSummary, hourBucket, pingHeartbeat, recordHeartbeat, trackTrafficRate, INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
