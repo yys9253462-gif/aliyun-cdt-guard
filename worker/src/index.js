@@ -198,6 +198,11 @@ function coordinator(env) {
 }
 var index_default = {
   fetch(request, env, ctx) {
+    // 只有需要读写配置/状态的请求才进 Durable Object（它是串行的，巡检时会排队）。
+    // 健康检查和随便乱扫的路径在边缘直接回，既不排队，也不给协调器添负担。
+    const path = new URL(request.url).pathname;
+    const needsCoordinator = path === "/setup" || path === "/webhook" || path.startsWith("/webhook/") || path.startsWith("/control/");
+    if (!needsCoordinator) return withRequestContext(() => localWorker.fetch(request, env, ctx));
     if (env.CDT_COORDINATOR) return coordinator(env).fetch(request);
     return withRequestContext(() => localWorker.fetch(request, env, ctx));
   },

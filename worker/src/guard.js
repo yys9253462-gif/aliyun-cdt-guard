@@ -7,7 +7,7 @@ import { sendAlert } from './telegram.js';
 function makeLogger(tag) {
   return (message) => console.log(`[${tag}] ${message}`);
 }
-async function trackStatusChange(config, state, name, key, status, logger) {
+async function trackStatusChange(config, state, name, key, status, logger, user = null) {
   const record = state[key] || (state[key] = {});
   const previous = record.last_status;
   if (previous === void 0 || previous === null) {
@@ -17,7 +17,11 @@ async function trackStatusChange(config, state, name, key, status, logger) {
   if (previous !== status) {
     record.last_status = status;
     logger(`[${name}] 实例状态变化：${previous} -> ${status}`);
-    if (previous === "Running" && status === "Stopped") {
+    // 机器人自己关的（超标止损 / 在机器人里手动关机）不算「意外停机」，不再推送误导性的提醒
+    const botStopped = Boolean(record.stop_sent_at) || Boolean(user && user.manual_stopped);
+    if (previous === "Running" && status === "Stopped" && botStopped) {
+      logger(`[${name}] 已按机器人的关机指令停止`);
+    } else if (previous === "Running" && status === "Stopped") {
       const eventKey = `${key}:status_down`;
       if (eventAllowed(state, eventKey, "status_down", NOTIFY_COOLDOWN)) {
         const msg = `机器: ${sanitize(name)}
@@ -40,36 +44,31 @@ async function checkQuotaProgress(config, state, name, key, trafficGb, region, l
     return;
   }
   const percent = trafficGb / freeGb * 100;
-  for (const level of QUOTA_WARN_LEVELS) {
-    if (percent < level) {
-      continue;
-    }
-    const eventKey = `${key}:quota_${level}`;
-    if (level === 80 && !eventAllowed(
-      state,
-      `${key}:quota_95`,
-      "quota_95",
-      QUOTA_COOLDOWN
-    )) {
-      break;
-    }
-    if (!eventAllowed(state, eventKey, `quota_${level}`, QUOTA_COOLDOWN)) {
-      continue;
-    }
-    const area = isOverseasRegion(region) ? "非中国内地" : "中国内地";
-    const remain = freeGb - trafficGb;
-    const msg = `机器: ${sanitize(name)}
+  // 从高档往低档看，只处理「已经达到的最高一档」：
+  // 一轮里从 70% 跳到 96% 时只发 95% 那条；95% 发过以后也不再补发 80%。
+  const levels = [...QUOTA_WARN_LEVELS].sort((x, y) => y - x);
+  const level = levels.find((lv) => percent >= lv);
+  if (level === void 0) return;
+  const eventKey = `${key}:quota_${level}`;
+  if (!eventAllowed(state, eventKey, `quota_${level}`, QUOTA_COOLDOWN)) return;
+  const area = isOverseasRegion(region) ? "非中国内地" : "中国内地";
+  const remain = freeGb - trafficGb;
+  const msg = `机器: ${sanitize(name)}
 本月已用流量: ${trafficGb.toFixed(2)} GB
 免费额度: ${freeGb.toFixed(0)} GB/月（${area}）
 已使用 ${percent.toFixed(1)}%，剩余 ${remain.toFixed(2)} GB` + (remain <= 0 ? "\n注意: 免费额度已用尽，继续跑将开始产生费用。" : "");
-    const title = remain <= 0 ? "免费额度已用尽" : "免费额度即将用尽";
-    const levelName = level < 95 ? "warn" : "danger";
-    if (await sendAlert(config, title, msg, levelName, logger)) {
-      markEvent(state, eventKey, `quota_${level}`);
-    }
+  const title = remain <= 0 ? "免费额度已用尽" : "免费额度即将用尽";
+  const levelName = level < 95 ? "warn" : "danger";
+  if (await sendAlert(config, title, msg, levelName, logger)) {
+    markEvent(state, eventKey, `quota_${level}`);
   }
 }
 async function checkMoney(user, config, state, name, key, logger) {
+  // 余额和账单变化很慢，没必要每 5 分钟查一次（原来每台每天约 576 次财务接口调用）。
+  // 改成每小时最多查一次，省下的子请求留给流量与开关机。
+  const record = state[key] || (state[key] = {});
+  if (nowSeconds() - Number(record.money_checked_at || 0) < MONEY_CHECK_INTERVAL) return;
+  record.money_checked_at = nowSeconds();
   const balanceLimit = Number(user.balance_limit === void 0 ? DEFAULT_BALANCE_LIMIT : user.balance_limit);
   const billLimit = Number(user.bill_limit === void 0 ? DEFAULT_BILL_LIMIT : user.bill_limit);
   if (balanceLimit > 0) {
@@ -162,29 +161,17 @@ async function tryStart(user, config, state, name, key, trafficGb, logger) {
     }
     return;
   }
-  let waited = 0;
-  let started = false;
-  while (waited < START_WAIT_TIMEOUT_MS) {
-    await sleep(START_POLL_INTERVAL_MS);
-    waited += START_POLL_INTERVAL_MS;
-    let current = "Unknown";
-    try {
-      current = await getInstanceStatus(user.ak, user.sk, user.region, user.instance_id);
-    } catch (error) {
-      throwIfCancelled();
-      current = "Unknown";
-    }
-    logger(`[${name}] 等待启动... 当前状态 ${current} (${waited / 1e3}秒)`);
-    if (current === "Running") {
-      started = true;
-      break;
-    }
-    if (current === "Stopped") {
-      logger(`[${name}] 实例回落至 Stopped，开机被拒绝`);
-      break;
-    }
-  }
-  if (started) {
+  // 不再原地轮询等它启动（原来最多等 90 秒，期间整个机器人都在排队、按钮没反应）。
+  // 记下下发时间，由下一轮巡检确认结果：见 confirmStart。
+  record.start_sent_at = nowSeconds();
+  logger(`[${name}] 已下发开机指令，下一轮巡检确认是否启动成功`);
+}
+// 确认上一轮的自动开机结果。返回 true 表示本轮已处理完这台机器（不需要再走开机逻辑）。
+async function confirmStart(user, config, state, name, key, trafficGb, status, logger) {
+  const record = state[key] || (state[key] = {});
+  if (!record.start_sent_at) return false;
+  if (status === "Running") {
+    delete record.start_sent_at;
     clearCounter(state, key, "start_failures");
     delete record.last_retry_ts;
     logger(`[${name}] 实例已恢复运行`);
@@ -196,19 +183,27 @@ async function tryStart(user, config, state, name, key, trafficGb, logger) {
         markEvent(state, key, "resumed");
       }
     }
-  } else {
+    return true;
+  }
+  if (status === "Stopped") {
+    const mins = Math.max(1, Math.round((nowSeconds() - Number(record.start_sent_at)) / 60));
+    delete record.start_sent_at;
     const count = bumpCounter(state, key, "start_failures");
-    logger(`[${name}] 启动超时或被拒绝，累计失败 ${count} 次`);
+    logger(`[${name}] ${mins} 分钟前下发的开机没有成功，累计失败 ${count} 次`);
     if (eventAllowed(state, key, "start_failed")) {
       const msg = `机器: ${sanitize(name)}
 当前流量: ${trafficGb.toFixed(2)}GB
-已下发开机指令，但 ${START_WAIT_TIMEOUT_MS / 1e3} 秒内未进入运行状态。
+${mins} 分钟前已下发开机指令，但实例仍是「已停止」。
 通常为库存不足（抢占式实例被回收后资源未释放），累计失败 ${count} 次，脚本将每 ${RESOURCE_RETRY_COOLDOWN / 60} 分钟自动重试。`;
       if (await sendAlert(config, "开机未成功", msg, "danger", logger)) {
         markEvent(state, key, "start_failed");
       }
     }
+    return false;
   }
+  // Starting / Pending 等中间态：还在启动，下一轮再看
+  logger(`[${name}] 开机中（${status}），下一轮再确认`);
+  return true;
 }
 async function enforceStop(user, config, state, name, key, trafficGb, status, limitGb, logger) {
   if (status === "Running") {
@@ -448,14 +443,17 @@ async function checkOne(env, user, config, state, logger, collector) {
     if (state[`${key}:cred_failed`]) {
       delete state[`${key}:cred_failed`].cred_failed;
     }
-    await trackStatusChange(config, state, name, key, status, logger);
+    await trackStatusChange(config, state, name, key, status, logger, user);
     await checkQuotaProgress(config, state, name, key, trafficGb, region, logger);
     await checkMoney(user, config, state, name, key, logger);
     if (collector) {
       collector.push({ instanceId, name, trafficGb });
     }
     if (status === "Stopped" && state[key]) delete state[key].stop_sent_at;
-    if (trafficGb < limitGb) {
+    if ((trafficGb >= limitGb || user.manual_stopped) && state[key]) delete state[key].start_sent_at;
+    if (trafficGb < limitGb && await confirmStart(user, config, state, name, key, trafficGb, status, logger)) {
+      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger);
+    } else if (trafficGb < limitGb) {
       if (state[key]) delete state[key].stop_sent_at;
       await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger);
       if (status === "Stopped" && user.manual_stopped) {
@@ -628,7 +626,7 @@ async function runInspection(env, options = {}) {
     return { ok: false, error: String(error && error.message) };
   }
 }
-var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW, INSPECTION_HEALTH_KEY, INSPECTION_FAIL_ALERT_THRESHOLD, SURGE_SAMPLE_INTERVAL, SURGE_WINDOW_HOURS, SURGE_MIN_SPAN_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, SURGE_LAG_HOURS, SURGE_COOLDOWN, HEARTBEAT_KEEP_HOURS;
+var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW, INSPECTION_HEALTH_KEY, INSPECTION_FAIL_ALERT_THRESHOLD, SURGE_SAMPLE_INTERVAL, SURGE_WINDOW_HOURS, SURGE_MIN_SPAN_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, SURGE_LAG_HOURS, SURGE_COOLDOWN, HEARTBEAT_KEEP_HOURS, MONEY_CHECK_INTERVAL;
 MAX_START_FAILURES = 3;
 RESOURCE_RETRY_COOLDOWN = 1800;
 CHECK_FAILURE_ALERT_THRESHOLD = 3;
@@ -647,5 +645,6 @@ SURGE_MIN_RATE_GB_PER_HOUR = 1;
 SURGE_LAG_HOURS = 6;
 SURGE_COOLDOWN = 10800;
 HEARTBEAT_KEEP_HOURS = 26;
+MONEY_CHECK_INTERVAL = 3600;
 
-export { SURGE_LAG_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, checkSurge, heartbeatSummary, hourBucket, pingHeartbeat, recordHeartbeat, trackTrafficRate, INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
+export { MONEY_CHECK_INTERVAL, confirmStart, SURGE_LAG_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, checkSurge, heartbeatSummary, hourBucket, pingHeartbeat, recordHeartbeat, trackTrafficRate, INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
