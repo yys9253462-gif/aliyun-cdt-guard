@@ -7,6 +7,8 @@
 name = "cdt-guard"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
+# request-context.js 用 AsyncLocalStorage 隔离每个请求的预算/缓存，需要这个开关（与线上一致）
+compatibility_flags = ["nodejs_als"]
 workers_dev = true
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,20 @@ crons = ["*/5 * * * *", "0 1 * * *", "0 2 * * *"]
 #
 #    🔴 这里留空是故意的 —— 一键脚本（configure.sh）会自动帮你创建并填好，
 #       不需要你手工粘贴。如果你是自己手工部署，把上面命令输出的 id 填进来。
+# ---------------------------------------------------------------------------
+# Durable Object：串行化所有 Webhook / 定时任务，避免并发读写同一份配置和状态
+# ---------------------------------------------------------------------------
+# 线上数据（配置、状态）主存储在这个 DO 的存储里；KV 只镜像 config 作为备份。
+# ⚠️ 不要删除这个绑定或类：删掉后部署会销毁 DO 存储，丢失线上状态。
+# 迁移标签 cdt-coordinator-v1 线上已经应用过，重复部署会自动跳过。
+[[durable_objects.bindings]]
+name = "CDT_COORDINATOR"
+class_name = "GuardCoordinator"
+
+[[migrations]]
+tag = "cdt-coordinator-v1"
+new_sqlite_classes = ["GuardCoordinator"]
+
 [[kv_namespaces]]
 binding = "CDT_GUARD_KV"
 id = ""
