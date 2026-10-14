@@ -112,7 +112,8 @@ async function checkMoney(user, config, state, name, key, logger) {
         user.instance_id,
         user.bill_endpoint || ""
       );
-      billAmount = result.amount;
+      // 只有拿到的是这台机器自己的账单才判断警戒线；账号合计里有其他产品，会误报
+      billAmount = result.scope === "account" ? null : result.amount;
       billCurrency = result.currency;
     } catch (error) {
       billAmount = null;
@@ -436,9 +437,29 @@ async function checkOne(env, user, config, state, logger, collector) {
     const trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "");
     const status = await getInstanceStatus(ak, sk, region, instanceId);
     if (status === null) {
+      // 实例在阿里云上找不到（已释放 / 编号或地域填错）：这台机器实际上已经没有任何保护，
+      // 原来只写日志，现在推送一次（7 天内不重复），附「删除这台机器」按钮
       logger(`[${name}] 未找到实例 ${instanceId}，请检查实例编号与地域是否匹配`);
+      const eventKey = `${key}:not_found`;
+      if (eventAllowed(state, eventKey, "not_found", CREDENTIAL_ALERT_COOLDOWN)) {
+        const msg = `机器: ${sanitize(name)}
+在阿里云「${sanitize(region)}」地域找不到实例 ${sanitize(instanceId)}。
+可能是实例已经释放，或者实例编号 / 地域填错了。这台机器目前没有任何流量保护。
+
+· 机器已经不用了 → 点下面的「删除这台机器」把它从监控里摘掉；
+· 机器还在 → 点「➕ 添加账号」重新扫描并加入。
+（本提醒 7 天内只发一次。）`;
+        const keyboard = [[
+          { text: "🗑 删除这台机器", callback_data: `del:${key}` },
+          { text: "➕ 添加账号", callback_data: "addacct" }
+        ]];
+        if (await sendAlert(config, "找不到实例（监控已失效）", msg, "danger", logger, keyboard)) {
+          markEvent(state, eventKey, "not_found");
+        }
+      }
       return;
     }
+    if (state[`${key}:not_found`]) delete state[`${key}:not_found`];
     clearCounter(state, key, "check_failures");
     if (state[`${key}:cred_failed`]) {
       delete state[`${key}:cred_failed`].cred_failed;

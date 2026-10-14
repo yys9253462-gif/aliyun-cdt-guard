@@ -475,10 +475,11 @@ do_selfcheck() {
   #      所以这里先把响应整个收进变量，再慢慢处理。
   printf "正在连接程序做自检，请稍等几秒...\n\n"
 
-  local url="${worker_url}/setup?key=${secret}"
+  # 密钥放在请求头里，不放进网址：网址会原样出现在 Cloudflare 日志里
+  local url="${worker_url}/setup"
   local body=""
   local http_code=""
-  body="$(curl -s --max-time 25 -w '\n__HTTP_CODE__%{http_code}' "$url" 2>/dev/null || true)"
+  body="$(curl -s --max-time 25 -H "X-CDT-Key: ${secret}" -w '\n__HTTP_CODE__%{http_code}' "$url" 2>/dev/null || true)"
 
   # 从响应末尾把状态码抠出来
   http_code="$(printf '%s' "$body" | sed -n 's/.*__HTTP_CODE__\([0-9]\{3\}\)$/\1/p' || true)"
@@ -486,8 +487,8 @@ do_selfcheck() {
 
   if [ -z "$http_code" ] || [ "$http_code" = "000" ]; then
     warn "连不上自检网址（多半是网络问题，不是程序坏了）。"
-    printf "   你可以稍后自己打开浏览器试试：\n"
-    printf "   ${CYAN}%s${RESET}\n" "$url"
+    printf "   你可以稍后自己打开浏览器试试（把密钥换成你的网址密钥）：\n"
+    printf "   ${CYAN}%s?key=你的网址密钥${RESET}\n" "$url"
     return 1
   fi
 

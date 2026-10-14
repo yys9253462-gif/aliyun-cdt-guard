@@ -98,6 +98,17 @@ function resolveCurrentDevice(config, currentKey) {
   if (byId) return byId;
   return key.startsWith("i-") ? null : findUserByName(config, key);
 }
+function deleteConfirmText(user) {
+  const name = sanitize(user?.name || user?.instance_id);
+  return `确定要把 ${name} 从监控里删除吗？
+删除后这台机器不再有超标自动关机的保护（阿里云上的实例本身不会被删除）。`;
+}
+function deleteConfirmRows(instanceId) {
+  return [[
+    { text: "🗑 确认删除", callback_data: `delok:${instanceId}` },
+    { text: "❌ 取消", callback_data: "cancelop" }
+  ]];
+}
 async function deleteDevice(env, config, instanceId) {
   const list = Array.isArray(config?.users) ? config.users : [];
   const idx = list.findIndex((u) => String(u?.instance_id || "") === String(instanceId || ""));
@@ -608,7 +619,12 @@ async function handlePlainText(env, config, token, chatId, text, messageId = nul
     return;
   }
   if (matchMain(raw, LBL_STOP_ALL)) {
-    await sendText(token, chatId, await doBatchPower(config, "stop", env));
+    // 一次关掉所有机器，误点代价大：先确认
+    const active = (config?.users || []).filter((u) => !u?.paused).length;
+    await sendText(token, chatId, `确定要关掉全部 ${active} 台机器吗？（已暂停监控的不受影响）`, [[
+      { text: "✅ 确认全部关机", callback_data: "stopallok" },
+      { text: "❌ 取消", callback_data: "cancelop" }
+    ]]);
     return;
   }
   if (matchMain(raw, LBL_DEVICES)) {
@@ -760,10 +776,7 @@ async function handlePlainText(env, config, token, chatId, text, messageId = nul
       return;
     }
     if (matchMain(raw, LBL_DEV_DELETE)) {
-      const message = await deleteDevice(env, config, current.instance_id);
-      await sendText(token, chatId, message);
-      await setCurrentDevice(env, chatId, "");
-      await sendDeviceList(token, chatId, config, env);
+      await sendText(token, chatId, deleteConfirmText(current), deleteConfirmRows(current.instance_id));
       return;
     }
   }
@@ -945,10 +958,30 @@ async function dispatchCallback(env, config, token, callback) {
       await sendText(token, chatId, await togglePause(env, config, instanceId));
       return;
     case "del": {
-      await answerCallback(token, callbackId, "正在删除...");
-      await sendText(token, chatId, await deleteDevice(env, config, instanceId));
+      // 告警消息里的「删除这台机器」：同样先确认
+      const user = findUserById(config, instanceId);
+      await answerCallback(token, callbackId);
+      if (!user) {
+        await sendText(token, chatId, "这台机器已经不在监控列表里了。");
+        return;
+      }
+      await sendText(token, chatId, deleteConfirmText(user), deleteConfirmRows(instanceId));
       return;
     }
+    case "delok": {
+      await answerCallback(token, callbackId, "正在删除...");
+      await sendText(token, chatId, await deleteDevice(env, config, instanceId));
+      await setCurrentDevice(env, chatId, "");
+      return;
+    }
+    case "stopallok":
+      await answerCallback(token, callbackId, "正在下发关机指令...");
+      await sendText(token, chatId, await doBatchPower(config, "stop", env));
+      return;
+    case "cancelop":
+      await answerCallback(token, callbackId, "已取消");
+      await sendText(token, chatId, "已取消，什么都没改。");
+      return;
     case "addacct":
       await answerCallback(token, callbackId, "开始添加账号");
       await startAddAccount(env, token, chatId);
@@ -958,4 +991,4 @@ async function dispatchCallback(env, config, token, callback) {
   }
 }
 
-export { HELP_TEXT, buildInspectionReply, deleteDevice, deviceActionRows, deviceMenuRows, dispatchCallback, doBatchPower, doStart, doStop, findUserById, findUserByName, handleCallback, handleCommand, handlePlainText, handleUpdate, isAuthorized, limitDeviceRows, limitPresetRows, mainMenuRows, parseLimitChoice, resolveCurrentDevice, runInspection2, sendDeviceActions, sendDeviceList, sendLimitDeviceList, sendLimitPresets, sendMainMenu, sendReport, setDeviceLimit, togglePause };
+export { deleteConfirmRows, deleteConfirmText, HELP_TEXT, buildInspectionReply, deleteDevice, deviceActionRows, deviceMenuRows, dispatchCallback, doBatchPower, doStart, doStop, findUserById, findUserByName, handleCallback, handleCommand, handlePlainText, handleUpdate, isAuthorized, limitDeviceRows, limitPresetRows, mainMenuRows, parseLimitChoice, resolveCurrentDevice, runInspection2, sendDeviceActions, sendDeviceList, sendLimitDeviceList, sendLimitPresets, sendMainMenu, sendReport, setDeviceLimit, togglePause };

@@ -798,7 +798,17 @@ console.log('--- 15. 🔴 删除失效机器（用户诉求：失效/已删的�
 
     check('按钮被立刻回应（不转圈）', calls.answerCallbackQuery.length === 1,
       `实际 ${calls.answerCallbackQuery.length}`);
+    const pending = await common.loadConfig(env);
+    check('第一次点只弹确认，不直接删除',
+      pending.users.some((u) => u.instance_id === 'i-aaa111') && allText(calls).includes('确定要把'),
+      allText(calls).slice(0, 120));
 
+    // 点「确认删除」才真正删除
+    await bot.handleCallback(env, pending, TOKEN, {
+      id: 'cb-2',
+      data: 'delok:i-aaa111',
+      message: { chat: { id: CHAT }, message_id: 6 },
+    });
     const after = await common.loadConfig(env);
     check('🔴 点按钮后配置里真的删掉了',
       !after.users.some((u) => u.instance_id === 'i-aaa111'),

@@ -143,8 +143,10 @@ async function buildBalance(config) {
       lines.push(`  账户余额: ${balanceLine}`);
     }
     let billAmount = null;
+    let billScope = "";
     let billCurrency = "";
     try {
+      billScope = "";
       const bill = await getInstanceBill(
         ak,
         user?.sk || "",
@@ -154,6 +156,7 @@ async function buildBalance(config) {
       );
       billAmount = bill.amount;
       billCurrency = bill.currency;
+      billScope = bill.scope;
     } catch (error) {
       billAmount = null;
     }
@@ -166,7 +169,11 @@ async function buildBalance(config) {
       if (billLimit > 0 && billAmount > billLimit) {
         suffix = `（已超警戒线 ${billSymbol}${gb(billLimit)}）`;
       }
-      lines.push(`  本月账单: ${billSymbol}${gb(billAmount)}${suffix}`);
+      if (billScope === "account") {
+        lines.push(`  本月账单（账号合计，含其他产品）: ${billSymbol}${gb(billAmount)}`);
+      } else {
+        lines.push(`  本月账单: ${billSymbol}${gb(billAmount)}${suffix}`);
+      }
     }
     let trafficGb = -1;
     try {
@@ -285,8 +292,10 @@ async function buildReport(config) {
     }
     const detail = await getInstanceDetail(ak, sk, region, instanceId);
     let billAmount = null;
+    let billScope = "";
     let billCurrency = "";
     try {
+      billScope = "";
       const bill = await getInstanceBill(
         ak,
         sk,
@@ -296,6 +305,7 @@ async function buildReport(config) {
       );
       billAmount = bill.amount;
       billCurrency = bill.currency;
+      billScope = bill.scope;
     } catch (error) {
       billAmount = null;
     }
@@ -338,7 +348,7 @@ async function buildReport(config) {
         );
       }
     }
-    lines.push(`  本月账单: ${money(billAmount, billCurrency, user?.currency || "$")}`);
+    lines.push(billScope === "account" ? `  本月账单（账号合计，含其他产品）: ${money(billAmount, billCurrency, user?.currency || "$")}` : `  本月账单: ${money(billAmount, billCurrency, user?.currency || "$")}`);
     let balanceStr;
     if (balanceAmount === null || balanceAmount === void 0) {
       balanceStr = "查询失败";

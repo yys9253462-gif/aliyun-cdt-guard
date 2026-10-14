@@ -71,7 +71,8 @@ function isTransient(parsed, httpStatus) {
     "RequestTimeout",
     "Timeout"
   ];
-  return transientCodes.includes(code);
+  // Throttling.Api / Throttling.Resource 等限流码、ServiceUnavailable 的各种变体都按临时错误重试
+  return transientCodes.includes(code) || code.startsWith("Throttling") || code.startsWith("ServiceUnavailable");
 }
 async function requestWithRetry(options, retries = RETRY_TIMES) {
   throwIfCancelled();
@@ -277,7 +278,7 @@ async function stopInstance(accessKeyId, accessKeySecret, region, instanceId) {
     action: "StopInstance",
     version: ECS_VERSION,
     params: { RegionId: region, InstanceId: instanceId }
-  }, 1);
+  }, 2);
   unwrap(result, "关机");
   if (journal) await journal.mark(journalKey);
   return true;
@@ -355,7 +356,7 @@ async function getInstanceBill(accessKeyId, accessKeySecret, region, instanceId,
       const items = data.Data && data.Data.Items || [];
       const amount = items.reduce((sum, item) => sum + Number(item.PretaxAmount || 0), 0);
       const currency = items.length ? items[0].Currency || "" : "";
-      return { amount, currency };
+      return { amount, currency, scope: "instance" };
     }
   } catch (error) {
   }
@@ -370,12 +371,15 @@ async function getInstanceBill(accessKeyId, accessKeySecret, region, instanceId,
       params: { BillingCycle: cycle }
     }, 1);
     const data = result && result.parsed;
-    const items = data && data.Data && data.Data.Items && data.Data.Items.Item || [];
+    // 原来这里失败也会算出 0，显示成「本月账单 $0.00」；现在失败一律返回 -1（显示「查询失败」）
+    if (!data || !data.Success) return { amount: -1, currency: "", scope: "none" };
+    const items = data.Data && data.Data.Items && data.Data.Items.Item || [];
     const amount = items.reduce((sum, item) => sum + Number(item.PretaxAmount || 0), 0);
     const currency = items.length ? items[0].Currency || "" : "";
-    return { amount, currency };
+    // 这是整个账号的账单（含 OSS 等其他产品），不是这台机器的，调用方要区分对待
+    return { amount, currency, scope: "account" };
   } catch (error) {
-    return { amount: -1, currency: "" };
+    return { amount: -1, currency: "", scope: "none" };
   }
 }
 var CDT_ENDPOINT, CDT_PAGE_SIZE, CDT_MAX_PAGES, CDT_VERSION, ECS_VERSION, BSS_VERSION, BSS_ENDPOINTS, FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, OVERSEAS_PREFIXES, RETRY_TIMES, RETRY_DELAY_MS, SUBREQUEST_BUDGET, BudgetExhaustedError, ApiError, balanceCacheByAk;
