@@ -93,6 +93,7 @@ async function sendText(token, chatId, text, keyboard = null) {
     return false;
   }
   let allOk = true;
+  const failed = [];
   for (let i = 0; i < segments.length; i += 1) {
     const isLast = i === segments.length - 1;
     const payload = {
@@ -115,10 +116,14 @@ async function sendText(token, chatId, text, keyboard = null) {
     }
     if (result === null) {
       allOk = false;
+      failed.push({ segment: segments[i], isLast });
     }
   }
+  // 只重发没发出去的段落；原来整条消息重发，已经发出去的段落会重复
   if (!allOk && requestContext().outbox) {
-    requestContext().outbox.push({ kind: "text", token, chatId, text, keyboard });
+    const retryText = failed.map((f) => f.segment).join("\n");
+    const retryKeyboard = failed.some((f) => f.isLast) ? keyboard : null;
+    requestContext().outbox.push({ kind: "text", token, chatId, text: retryText, keyboard: retryKeyboard });
   }
   return allOk;
 }
@@ -129,6 +134,7 @@ async function sendMenu(token, chatId, text, rows) {
     return false;
   }
   let allOk = true;
+  const failedSegments = [];
   for (let i = 0; i < segments.length; i += 1) {
     const payload = {
       chat_id: chatId,
@@ -156,10 +162,17 @@ async function sendMenu(token, chatId, text, rows) {
     }
     if (result === null) {
       allOk = false;
+      failedSegments.push(segments[i]);
     }
   }
+  // 菜单键盘挂在第一段上：第一段失败才需要带菜单重发，否则只补发失败的文字段
   if (!allOk && requestContext().outbox) {
-    requestContext().outbox.push({ kind: "menu", token, chatId, text, rows });
+    const retryText = failedSegments.join("\n");
+    if (failedSegments[0] === segments[0]) {
+      requestContext().outbox.push({ kind: "menu", token, chatId, text: retryText, rows });
+    } else {
+      requestContext().outbox.push({ kind: "text", token, chatId, text: retryText, keyboard: null });
+    }
   }
   return allOk;
 }

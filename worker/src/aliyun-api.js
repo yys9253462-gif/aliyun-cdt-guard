@@ -219,7 +219,7 @@ async function getInstanceDetail(accessKeyId, accessKeySecret, region, instanceI
     spec: `${cpu}核${mem}G`
   };
 }
-async function listInstances(accessKeyId, accessKeySecret, region) {
+async function listInstances(accessKeyId, accessKeySecret, region, retries = RETRY_TIMES) {
   const instances = [];
   for (let page = 1; page <= 100; page++) {
     const result = await requestWithRetry({
@@ -229,7 +229,7 @@ async function listInstances(accessKeyId, accessKeySecret, region) {
       action: "DescribeInstances",
       version: ECS_VERSION,
       params: { RegionId: region, PageSize: "100", PageNumber: String(page) }
-    });
+    }, retries);
     const data = unwrap(result, "列出实例");
     const list = data.Instances?.Instance || [];
     instances.push(...list.map((inst) => ({ instanceId: inst.InstanceId || "", instanceName: inst.InstanceName || "", status: inst.Status || "" })));

@@ -247,7 +247,9 @@ async function buildWeekly(env, config) {
         );
       }
     }
-    const days = Math.max(new Set(points.map((p) => p?.date)).size, 1);
+    // 第一个点到最后一个点之间经过的天数（7 个日快照只有 6 个间隔），原来按点数算会把日均算低
+    const spanMs = Date.parse(`${last?.date}T00:00:00Z`) - Date.parse(`${first?.date}T00:00:00Z`);
+    const days = Math.max(Number.isFinite(spanMs) ? Math.round(spanMs / 864e5) : 1, 1);
     if (used >= 0) {
       lines.push(`  日均约: ${gb(used / days)} GB/天（覆盖 ${days} 天）`);
     }

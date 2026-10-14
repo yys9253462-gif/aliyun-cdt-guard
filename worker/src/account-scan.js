@@ -1,4 +1,4 @@
-import { FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, describeRegions, isOverseasRegion, listInstances } from './aliyun-api.js';
+import { FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, describeRegions, isOverseasRegion, isSubrequestBudgetExhausted, listInstances } from './aliyun-api.js';
 import { sanitize } from './common.js';
 import { ERR_CREDENTIAL, classifyError } from './credential-error.js';
 import { regionDisplayWithCode } from './region-names.js';
@@ -34,12 +34,20 @@ async function scanAccount(ak, sk) {
   }
   regions = regions.slice(0, MAX_REGIONS);
   const instances = [];
+  // 查询失败的地域要记下来告诉用户。原来失败一律当成「这个地域没有机器」，
+  // 限流时重试还会把单次请求的调用次数耗光，连后面正常的地域也扫不到，却照样显示「扫描完成」。
+  // 现在：扫描不重试（失败了点「重新扫描」即可），调用次数不够时剩下的地域标成「未扫描」。
+  const failedRegions = [];
   for (let i = 0; i < regions.length; i += BATCH_SIZE) {
     const batch = regions.slice(i, i + BATCH_SIZE);
+    if (isSubrequestBudgetExhausted()) {
+      for (const region of regions.slice(i)) failedRegions.push({ region, reason: "本次没来得及扫描" });
+      break;
+    }
     const results = await Promise.all(
       batch.map(async (region) => {
         try {
-          const list = await listInstances(accessKeyId, accessKeySecret, region);
+          const list = await listInstances(accessKeyId, accessKeySecret, region, 1);
           return list.map((item) => ({
             instanceId: item.instanceId || "",
             instanceName: item.instanceName || "",
@@ -47,7 +55,9 @@ async function scanAccount(ak, sk) {
             region,
             isOverseas: isOverseasRegion(region)
           }));
-        } catch (_error) {
+        } catch (error) {
+          const { reason } = classifyError(error);
+          failedRegions.push({ region, reason: String(reason || error && error.message || "查询失败").split("\n")[0].slice(0, 60) });
           return [];
         }
       })
@@ -56,11 +66,19 @@ async function scanAccount(ak, sk) {
       instances.push(...item);
     }
   }
+  if (failedRegions.length && failedRegions.length >= regions.length) {
+    return {
+      credential: CRED_UNKNOWN,
+      message: `所有 ${regions.length} 个地域都没能查询成功（例如：${failedRegions[0].reason}）。`,
+      instances: [],
+      failedRegions
+    };
+  }
   instances.sort((a, b) => {
     if (a.region !== b.region) return a.region < b.region ? -1 : 1;
     return a.instanceId < b.instanceId ? -1 : 1;
   });
-  return { credential: CRED_OK, message: "", instances };
+  return { credential: CRED_OK, message: "", instances, failedRegions };
 }
 var FALLBACK_REGIONS = [
   "cn-hangzhou",
@@ -89,8 +107,24 @@ var FALLBACK_REGIONS = [
   "me-central-1",
   "ap-southeast-4"
 ];
-function formatScanResult(instances, maxShow = 20) {
+function formatFailedRegions(failedRegions) {
+  const list = Array.isArray(failedRegions) ? failedRegions : [];
+  if (!list.length) return "";
+  const shown = list.slice(0, 8).map((f) => `· ${regionDisplayWithCode(f.region)}：${sanitize(f.reason)}`);
+  if (list.length > shown.length) shown.push(`· 以及另外 ${list.length - shown.length} 个地域`);
+  return [
+    "",
+    `⚠️ 有 ${list.length} 个地域没扫到，这些地域里的机器不在上面的列表里：`,
+    ...shown,
+    "可以稍后点「🔄 重新扫描」再试；已经找到的机器可以先加入。"
+  ].join("\n");
+}
+function formatScanResult(instances, maxShow = 20, failedRegions = []) {
   const list = Array.isArray(instances) ? instances : [];
+  const warning = formatFailedRegions(failedRegions);
+  if (!list.length && warning) {
+    return `这次没有找到机器。${warning}`;
+  }
   if (!list.length) {
     return "这个账号下没有找到任何 ECS 实例。\n\n如果你确定账号里有机器，通常是这两种情况：\n\xB7 这把 Key 是子账号的，但没授权能看到那些机器\n\xB7 机器在不常见的地域，超出了扫描范围";
   }
@@ -108,7 +142,8 @@ function formatScanResult(instances, maxShow = 20) {
     lines.push("");
     lines.push(`（还有 ${list.length - show.length} 台没列出来，也可一并加入）`);
   }
+  if (warning) lines.push(warning);
   return lines.join("\n");
 }
 
-export { BATCH_SIZE, CRED_BAD, CRED_OK, CRED_UNKNOWN, FALLBACK_REGIONS, MAX_REGIONS, formatScanResult, scanAccount };
+export { formatFailedRegions, BATCH_SIZE, CRED_BAD, CRED_OK, CRED_UNKNOWN, FALLBACK_REGIONS, MAX_REGIONS, formatScanResult, scanAccount };

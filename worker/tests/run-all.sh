@@ -134,7 +134,7 @@ fi
 echo "新增修复回归测试"
 bash tests/test-login.sh || total_fail=$((total_fail + 1))
 bash tests/test-deploy-guard.sh || total_fail=$((total_fail + 1))
-for test in tests/test-worker-account.mjs tests/test-bind-chat.mjs tests/test-config-key.mjs tests/test-cdt-traffic.mjs tests/test-manual-stop-rotation.mjs tests/test-stop-gaps.mjs tests/test-early-warning.mjs tests/test-notify-start.mjs tests/test-round2-fixes.mjs; do
+for test in tests/test-worker-account.mjs tests/test-bind-chat.mjs tests/test-config-key.mjs tests/test-cdt-traffic.mjs tests/test-manual-stop-rotation.mjs tests/test-stop-gaps.mjs tests/test-early-warning.mjs tests/test-notify-start.mjs tests/test-round2-fixes.mjs tests/test-round3-fixes.mjs; do
   "$NODE" "$test" || total_fail=$((total_fail + 1))
 done
 echo ""

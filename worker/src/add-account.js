@@ -170,7 +170,7 @@ async function handleAddAccountStep(env, token, chatId, text, messageId) {
       instances,
       scanTotal: (result.instances || []).length
     });
-    const body = formatScanResult(instances);
+    const body = formatScanResult(instances, 20, result.failedRegions);
     const footer = instances.length ? "\n\n点下面「全部加入监控」即可自动配好（内地默认 18GB，非内地默认 180GB）。" : "\n\n没有机器可加。你可以重新扫描，或取消。";
     await sendMenu(
       token,
@@ -236,7 +236,7 @@ ${again.message}
         chatId,
         `重新扫描完成。
 
-${formatScanResult(fresh)}
+${formatScanResult(fresh, 20, again.failedRegions)}
 
 点下面按钮决定怎么做：`,
         [[LBL_ADD_CONFIRM], [LBL_ADD_RESCAN, LBL_ADD_CANCEL]]

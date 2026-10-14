@@ -125,7 +125,7 @@ async function deleteDevice(env, config, instanceId) {
     `已把 ${name} 从监控列表里删除。`,
     region ? `（地域 ${region}，实例 ${instanceId}）` : `（实例 ${instanceId}）`,
     "",
-    "注意：**阿里云上的 ECS 实例本身没有被删除**，监控只是不再管它。",
+    "注意：*阿里云上的 ECS 实例本身没有被删除*，监控只是不再管它。",
     "如果这台机器确实不用了，记得去阿里云控制台释放实例，避免继续计费。"
   ];
   return lines.join("\n");
@@ -475,7 +475,8 @@ async function sendReport(env, config, token, chatId) {
 async function runInspection2(env, config, token, chatId) {
   const { runInspection: guardRun } = await import('./guard.js');
   try {
-    const summary = await guardRun(env);
+    // 所有请求都在协调器里排队执行，不会和定时巡检同时跑，手动巡检不需要再避让软锁
+    const summary = await guardRun(env, { force: true });
     if (summary && summary.skipped) {
       await sendText(
         token,
