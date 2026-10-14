@@ -35,7 +35,16 @@ async function trackStatusChange(config, state, name, key, status, logger, user 
     }
   }
 }
-async function checkQuotaProgress(config, state, name, key, trafficGb, region, logger) {
+// 额度提醒和突增预警是「额度池」级别的事：同一账号、同一池的多台机器看到的是同一个数，
+// 按机器各推一条就是重复。事件键按「账号 + 池」算，一个池只推一条。
+function poolEventKey(user, region, fallbackKey) {
+  const ak = String(user && user.ak || "").trim();
+  if (!ak) return fallbackKey;
+  let h = 5381;
+  for (let i = 0; i < ak.length; i += 1) h = (h * 33 ^ ak.charCodeAt(i)) >>> 0;
+  return `acct:${h.toString(36)}:${isOverseasRegion(region) ? "overseas" : "mainland"}`;
+}
+async function checkQuotaProgress(config, state, name, key, trafficGb, region, logger, user = null) {
   if (trafficGb < 0) {
     return;
   }
@@ -49,7 +58,7 @@ async function checkQuotaProgress(config, state, name, key, trafficGb, region, l
   const levels = [...QUOTA_WARN_LEVELS].sort((x, y) => y - x);
   const level = levels.find((lv) => percent >= lv);
   if (level === void 0) return;
-  const eventKey = `${key}:quota_${level}`;
+  const eventKey = `${poolEventKey(user, region, key)}:quota_${level}`;
   if (!eventAllowed(state, eventKey, `quota_${level}`, QUOTA_COOLDOWN)) return;
   const area = isOverseasRegion(region) ? "非中国内地" : "中国内地";
   const remain = freeGb - trafficGb;
@@ -280,7 +289,7 @@ async function remindPausedOverLimit(user, config, state, name, key, logger) {
   if (!eventAllowed(state, eventKey, "paused_over", OVERLIMIT_COOLDOWN)) return;
   let trafficGb;
   try {
-    trafficGb = await getCdtTrafficGb(user.ak, user.sk, user.cdt_endpoint || "");
+    trafficGb = await getCdtTrafficGb(user.ak, user.sk, user.cdt_endpoint || "", user.region);
   } catch (error) {
     throwIfCancelled();
     return;
@@ -314,14 +323,14 @@ function trackTrafficRate(state, key, trafficGb, now = nowSeconds()) {
 }
 // 流量突增预警：阿里云的流量数据滞后 1~6 小时，阈值反应不过来。
 // 按最近的增长速度推算「滞后时间内」会不会冲过免费额度，会的话提前告警（不自动关机）。
-async function checkSurge(config, state, name, key, trafficGb, region, limitGb, logger) {
+async function checkSurge(config, state, name, key, trafficGb, region, limitGb, logger, user = null) {
   const rate = trackTrafficRate(state, key, trafficGb);
   if (!rate || rate.rateGbPerHour < SURGE_MIN_RATE_GB_PER_HOUR) return;
   const freeGb = getFreeQuotaGb(region);
   const projected = trafficGb + rate.rateGbPerHour * SURGE_LAG_HOURS;
   if (projected < Math.min(freeGb, limitGb)) return;
   logger(`[${name}] 流量增长 ${rate.rateGbPerHour.toFixed(1)}GB/小时，${SURGE_LAG_HOURS} 小时后约 ${projected.toFixed(0)}GB`);
-  const eventKey = `${key}:surge`;
+  const eventKey = `${poolEventKey(user, region, key)}:surge`;
   if (!eventAllowed(state, eventKey, "surge", SURGE_COOLDOWN)) return;
   const msg = `机器: ${sanitize(name)}
 当前流量: ${trafficGb.toFixed(2)}GB (阈值 ${limitGb.toFixed(0)}GB，免费额度 ${freeGb.toFixed(0)}GB)
@@ -434,7 +443,7 @@ async function checkOne(env, user, config, state, logger, collector) {
     }
   }
   try {
-    const trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "");
+    const trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "", region);
     const status = await getInstanceStatus(ak, sk, region, instanceId);
     if (status === null) {
       // 实例在阿里云上找不到（已释放 / 编号或地域填错）：这台机器实际上已经没有任何保护，
@@ -465,7 +474,7 @@ async function checkOne(env, user, config, state, logger, collector) {
       delete state[`${key}:cred_failed`].cred_failed;
     }
     await trackStatusChange(config, state, name, key, status, logger, user);
-    await checkQuotaProgress(config, state, name, key, trafficGb, region, logger);
+    await checkQuotaProgress(config, state, name, key, trafficGb, region, logger, user);
     await checkMoney(user, config, state, name, key, logger);
     if (collector) {
       collector.push({ instanceId, name, trafficGb });
@@ -473,10 +482,10 @@ async function checkOne(env, user, config, state, logger, collector) {
     if (status === "Stopped" && state[key]) delete state[key].stop_sent_at;
     if ((trafficGb >= limitGb || user.manual_stopped) && state[key]) delete state[key].start_sent_at;
     if (trafficGb < limitGb && await confirmStart(user, config, state, name, key, trafficGb, status, logger)) {
-      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger);
+      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger, user);
     } else if (trafficGb < limitGb) {
       if (state[key]) delete state[key].stop_sent_at;
-      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger);
+      await checkSurge(config, state, name, key, trafficGb, region, limitGb, logger, user);
       if (status === "Stopped" && user.manual_stopped) {
         logger(`[${name}] 用户手动停机，保持停止，不自动开机`);
       } else if (status === "Stopped") {
@@ -668,4 +677,4 @@ SURGE_COOLDOWN = 10800;
 HEARTBEAT_KEEP_HOURS = 26;
 MONEY_CHECK_INTERVAL = 3600;
 
-export { MONEY_CHECK_INTERVAL, confirmStart, SURGE_LAG_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, checkSurge, heartbeatSummary, hourBucket, pingHeartbeat, recordHeartbeat, trackTrafficRate, INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
+export { poolEventKey, MONEY_CHECK_INTERVAL, confirmStart, SURGE_LAG_HOURS, SURGE_MIN_RATE_GB_PER_HOUR, checkSurge, heartbeatSummary, hourBucket, pingHeartbeat, recordHeartbeat, trackTrafficRate, INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };

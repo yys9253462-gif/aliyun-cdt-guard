@@ -219,8 +219,13 @@ console.log('\n【第三组】流量额度页：按账号分组，混合账号�
 }
 
 {
-  // 混合地域账号：明说拆不出，不算错账
-  const f = makeFetch(() => ({ TrafficDetails: details(45) }));
+  // 混合地域账号：明细带地域（BusinessRegionId），按内地 / 非内地两个池分别显示
+  const f = makeFetch(() => ({
+    TrafficDetails: [
+      ...Array.from({ length: 5 }, () => ({ Traffic: String(GB), BusinessRegionId: 'cn-hangzhou' })),
+      ...Array.from({ length: 40 }, () => ({ Traffic: String(GB), BusinessRegionId: 'ap-northeast-2' })),
+    ],
+  }));
   clearTrafficCache();
   const text = await buildTraffic({
     users: [
@@ -234,9 +239,10 @@ console.log('\n【第三组】流量额度页：按账号分组，混合账号�
       },
     ],
   });
-  check('混合账号给出警告并指向控制台',
-    text.includes('同时含有内地与非内地') && text.includes('控制台'));
-  check('混合账号不显示分池「剩余」（那个数字是错的）', !text.includes('剩 '));
+  check('混合账号：内地池单独显示（20GB 用了 5GB）',
+    text.includes('中国内地额度: 20 GB，已用 5.00 GB') && text.includes('剩 15.00 GB'), text);
+  check('混合账号：非内地池单独显示（200GB 用了 40GB）',
+    text.includes('非中国内地额度: 200 GB，已用 40.00 GB') && text.includes('剩 160.00 GB'), text);
   check('混合账号仍报账号合计用量', text.includes('45.00 GB'));
   f.restore();
 }

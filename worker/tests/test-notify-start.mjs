@@ -112,7 +112,9 @@ console.log('--- 2. 一轮跳过两档额度提醒只推一条 ---');
   await run(env);
   check('只到 85%：推 80% 档提醒', count('免费额度即将用尽') === 1);
   const state = await common.loadState(env);
-  check('记的是 80% 档', Boolean(state['i-a:quota_80']?.quota_80) && !state['i-a:quota_95']);
+  const poolKey = guard.poolEventKey({ ak: baseUser.ak }, baseUser.region, 'i-a');
+  check('记的是 80% 档（按账号 + 额度池记）', Boolean(state[`${poolKey}:quota_80`]?.quota_80) && !state[`${poolKey}:quota_95`],
+    Object.keys(state).join(','));
 }
 
 console.log('--- 3. 自动开机不原地等待，下一轮确认 ---');

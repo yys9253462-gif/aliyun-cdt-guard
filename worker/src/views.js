@@ -1,5 +1,5 @@
 import { buildSummaryText, groupByAccount, maskAk, quotaForGroup } from './account-summary.js';
-import { getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceDetail, getInstanceStatus, isOverseasRegion } from './aliyun-api.js';
+import { getCdtTrafficPools, getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceDetail, getInstanceStatus, isOverseasRegion } from './aliyun-api.js';
 import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, loadHistory, nowLocal, sanitize } from './common.js';
 import { regionDisplayWithCode } from './region-names.js';
 
@@ -60,8 +60,10 @@ async function buildTraffic(config) {
       continue;
     }
     let trafficGb;
+    let pools;
     try {
-      trafficGb = await getCdtTrafficGb(ak, sk, endpoint);
+      pools = await getCdtTrafficPools(ak, sk, endpoint);
+      trafficGb = pools.total;
     } catch (error) {
       lines.push(`  查询失败: ${sanitize(error)}`);
       lines.push("");
@@ -69,21 +71,15 @@ async function buildTraffic(config) {
     }
     lines.push(`  本月已用: ${gb(trafficGb)} GB（账号级计量：含该账号全部地域与产品）`);
     const { mainland, overseas } = quotaForGroup(members);
-    if (mainland > 0 && overseas > 0) {
-      lines.push("  ⚠️ 该账号同时含有内地与非内地机器，接口只返回合计用量，");
-      lines.push("     拆不出两个池各自的消耗，分池剩余暂不显示；");
-      lines.push(`     免费额度: 中国内地 ${mainland.toFixed(0)} GB + 非中国内地 ${overseas.toFixed(0)} GB（两池分别累计）`);
-      lines.push("     准确数字请以阿里云控制台「云数据传输」页面为准。");
-    } else {
-      const label = overseas > 0 ? "非中国内地额度" : "中国内地额度";
-      const quota = overseas > 0 ? overseas : mainland;
-      const remain = quota - trafficGb;
-      if (remain >= 0) {
-        lines.push(`  ${label}: ${quota.toFixed(0)} GB，已用 ${(trafficGb / quota * 100).toFixed(1)}%，剩 ${gb(remain)} GB`);
-      } else {
-        lines.push(`  ${label}: ${quota.toFixed(0)} GB，已超出 ${gb(-remain)} GB（正在计费）`);
-      }
-    }
+    // 按额度池分别显示（每条流量明细带地域，可以拆开两个池）
+    const poolLine = (label, quota, used) => {
+      const remain = quota - used;
+      return remain >= 0
+        ? `  ${label}: ${quota.toFixed(0)} GB，已用 ${gb(used)} GB（${(used / quota * 100).toFixed(1)}%），剩 ${gb(remain)} GB`
+        : `  ${label}: ${quota.toFixed(0)} GB，已用 ${gb(used)} GB，已超出 ${gb(-remain)} GB（正在计费）`;
+    };
+    if (mainland > 0) lines.push(poolLine("中国内地额度", mainland, pools.mainland));
+    if (overseas > 0) lines.push(poolLine("非中国内地额度", overseas, pools.overseas));
     lines.push("  机器:");
     for (const user of members) {
       const name = sanitize(user?.name || user?.instance_id);
@@ -177,7 +173,7 @@ async function buildBalance(config) {
     }
     let trafficGb = -1;
     try {
-      trafficGb = await getCdtTrafficGb(ak, user?.sk || "", user?.cdt_endpoint || "");
+      trafficGb = await getCdtTrafficGb(ak, user?.sk || "", user?.cdt_endpoint || "", user?.region || "");
     } catch (error) {
       trafficGb = -1;
     }
@@ -288,7 +284,7 @@ async function buildReport(config) {
     const sk = String(user.sk || "").trim();
     let trafficGb = -1;
     try {
-      trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "");
+      trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "", region);
     } catch (error) {
       trafficGb = -1;
     }
