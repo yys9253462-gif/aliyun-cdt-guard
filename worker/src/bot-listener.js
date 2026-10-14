@@ -268,8 +268,29 @@ export async function togglePause(env, config, instanceId) {
   return `机器 ${name} 现在是：${state}`;
 }
 
+/**
+ * 记下「这台机器是你手动关的」，并落盘。
+ *
+ * 为什么需要：巡检的规则是「流量安全 + 已停止 = 自动开机」。
+ * 如果手动关机不留记号，5 分钟内巡检就会把你刚关的机器又开起来。
+ * 手动开机时清掉记号，恢复正常的自动开机保护。
+ * env 缺省时只改内存（测试场景），不写 KV。
+ */
+async function setManualStopped(env, config, users, value) {
+  let changed = false;
+  for (const user of users) {
+    if (Boolean(user.manual_stopped) !== value) {
+      if (value) user.manual_stopped = true; else delete user.manual_stopped;
+      changed = true;
+    }
+  }
+  if (changed && env) {
+    await common.saveConfig(env, config);
+  }
+}
+
 /** 手动开机。 */
-export async function doStart(config, instanceId) {
+export async function doStart(config, instanceId, env = null) {
   const user = findUserById(config, instanceId);
   if (!user) return '没找到这台机器。';
   const name = common.sanitize(user.name || instanceId);
@@ -278,11 +299,12 @@ export async function doStart(config, instanceId) {
   } catch (error) {
     return `开机指令下发失败：${common.sanitize(error)}`;
   }
+  await setManualStopped(env, config, [user], false);
   return `已向 ${name} 下发开机指令。\n注意：如果是抢占式实例且库存不足，可能开不起来。`;
 }
 
-/** 手动关机（不影响自动止损逻辑）。 */
-export async function doStop(config, instanceId) {
+/** 手动关机。之后巡检不会自动把它开回来，直到你手动开机。 */
+export async function doStop(config, instanceId, env = null) {
   const user = findUserById(config, instanceId);
   if (!user) return '没找到这台机器。';
   const name = common.sanitize(user.name || instanceId);
@@ -291,7 +313,9 @@ export async function doStop(config, instanceId) {
   } catch (error) {
     return `关机指令下发失败：${common.sanitize(error)}`;
   }
-  return `已向 ${name} 下发关机指令。`;
+  await setManualStopped(env, config, [user], true);
+  return `已向 ${name} 下发关机指令。
+巡检不会自动把它开回来，需要时点「开机」即可恢复。`;
 }
 
 /**
@@ -300,7 +324,7 @@ export async function doStop(config, instanceId) {
  * 跳过已暂停的机器 —— 你按过「暂停」就说明不想让脚本碰它，
  * 批量操作也必须尊重这个意愿，否则暂停就形同虚设。
  */
-export async function doBatchPower(config, action) {
+export async function doBatchPower(config, action, env = null) {
   const users = config?.users || [];
   if (!users.length) return '当前没有配置任何机器。';
 
@@ -308,6 +332,7 @@ export async function doBatchPower(config, action) {
   const okList = [];
   const skipList = [];
   const failList = [];
+  const okUsers = [];
 
   for (const user of users) {
     const name = common.sanitize(user?.name || user?.instance_id);
@@ -322,10 +347,12 @@ export async function doBatchPower(config, action) {
         await api.stopInstance(user.ak, user.sk, user.region, user.instance_id);
       }
       okList.push(name);
+      okUsers.push(user);
     } catch (error) {
       failList.push(`${name}（${common.sanitize(error)}）`);
     }
   }
+  await setManualStopped(env, config, okUsers, action !== 'start');
 
   const lines = [`批量${verb}完成`, ''];
   if (okList.length) {
@@ -825,11 +852,11 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
     return;
   }
   if (L.matchMain(raw, L.LBL_START_ALL)) {
-    await tg.sendText(token, chatId, await doBatchPower(config, 'start'));
+    await tg.sendText(token, chatId, await doBatchPower(config, 'start', env));
     return;
   }
   if (L.matchMain(raw, L.LBL_STOP_ALL)) {
-    await tg.sendText(token, chatId, await doBatchPower(config, 'stop'));
+    await tg.sendText(token, chatId, await doBatchPower(config, 'stop', env));
     return;
   }
   if (L.matchMain(raw, L.LBL_DEVICES)) {
@@ -982,11 +1009,11 @@ export async function handlePlainText(env, config, token, chatId, text, messageI
       return;
     }
     if (L.matchMain(raw, L.LBL_DEV_START)) {
-      await tg.sendText(token, chatId, await doStart(config, current.instance_id));
+      await tg.sendText(token, chatId, await doStart(config, current.instance_id, env));
       return;
     }
     if (L.matchMain(raw, L.LBL_DEV_STOP)) {
-      await tg.sendText(token, chatId, await doStop(config, current.instance_id));
+      await tg.sendText(token, chatId, await doStop(config, current.instance_id, env));
       return;
     }
     if (L.matchMain(raw, L.LBL_DEV_PAUSE) || L.matchMain(raw, L.LBL_DEV_RESUME)) {
@@ -1173,12 +1200,12 @@ async function dispatchCallback(env, config, token, callback) {
 
     case 'up':
       await tg.answerCallback(token, callbackId, '正在下发开机指令...');
-      await tg.sendText(token, chatId, await doStart(config, instanceId));
+      await tg.sendText(token, chatId, await doStart(config, instanceId, env));
       return;
 
     case 'dn':
       await tg.answerCallback(token, callbackId, '正在下发关机指令...');
-      await tg.sendText(token, chatId, await doStop(config, instanceId));
+      await tg.sendText(token, chatId, await doStop(config, instanceId, env));
       return;
 
     case 'pz':

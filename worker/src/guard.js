@@ -65,6 +65,9 @@ export const MANUAL_INSPECTION_LOCK = 'manual_inspection_lock';
  */
 export const INSPECTION_LOCK_WINDOW = 180;
 
+/** 巡检轮转起点（state 里的键）：预算不够查完时，下一轮从这里开始 */
+export const INSPECTION_CURSOR_KEY = 'inspection_cursor';
+
 /** 简易日志器：Workers 里日志会进 Cloudflare 后台 */
 function makeLogger(tag) {
   return (message) => console.log(`[${tag}] ${message}`);
@@ -612,7 +615,10 @@ async function checkOne(env, user, config, state, logger, collector) {
     }
 
     if (trafficGb < limitGb) {
-      if (status === 'Stopped') {
+      if (status === 'Stopped' && user.manual_stopped) {
+        // 你在机器人里手动关的，不自动开回来（手动开机后会清掉这个记号）
+        logger(`[${name}] 流量安全，但实例是手动关机的，本轮不自动开机`);
+      } else if (status === 'Stopped') {
         await tryStart(user, config, state, name, key, trafficGb, logger);
       } else if (status === 'Running') {
         common.clearCounter(state, key, 'start_failures');
@@ -717,19 +723,40 @@ export async function runInspection(env, options = {}) {
     // 撞上的后果是**整个请求崩掉、本轮结果全丢**。
     // 这里改成「预算不够就停下，把已检查的结果正常保存并如实汇报」——
     // 少查几台只是延误，整轮崩掉才是真的影响止损。
+    // 轮转起点：上一轮预算用完时，从「没查到的那台」开始，
+    // 否则每轮都从第 1 台查起，排在后面的机器会永远查不到（也就永远不会被止损）。
+    let cursor = Number(state[INSPECTION_CURSOR_KEY] || 0);
+    if (!Number.isInteger(cursor) || cursor < 0 || cursor >= users.length) {
+      cursor = 0;
+    }
     let checked = 0;
     let budgetHit = false;
-    for (const user of users) {
+    let nextCursor = 0;
+    for (let i = 0; i < users.length; i += 1) {
+      const index = (cursor + i) % users.length;
       if (api.isSubrequestBudgetExhausted()) {
         budgetHit = true;
+        nextCursor = index;
         logger(
           `子请求预算已用完（已检查 ${checked}/${users.length} 台），` +
-          '本轮提前收尾以免整个请求失败。剩下的机器会在下一轮巡检补上。'
+          '本轮提前收尾以免整个请求失败。剩下的机器会在下一轮巡检优先补上。'
         );
         break;
       }
-      await checkWithTimeout(env, user, config, state, logger, collector);
+      await checkWithTimeout(env, users[index], config, state, logger, collector);
       checked += 1;
+      // 这台查到一半预算就用完了，它的结果不完整，下一轮从它开始重查
+      if (api.isSubrequestBudgetExhausted() && i < users.length - 1) {
+        budgetHit = true;
+        nextCursor = index;
+        logger(`子请求预算在检查第 ${checked} 台时用完，下一轮从这台开始补查`);
+        break;
+      }
+    }
+    if (nextCursor) {
+      state[INSPECTION_CURSOR_KEY] = nextCursor;
+    } else {
+      delete state[INSPECTION_CURSOR_KEY];
     }
 
     // 一轮结束统一落盘：状态一次 + 台账一次 = 恒定 2 次写入，
