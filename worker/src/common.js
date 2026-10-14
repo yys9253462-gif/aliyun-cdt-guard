@@ -2,6 +2,10 @@ function nowLocal() {
   const now = /* @__PURE__ */ new Date();
   return new Date(now.getTime() + TIMEZONE_OFFSET_HOURS * 3600 * 1e3);
 }
+// 当前计费周期（北京时间 YYYY-MM），测试与报表共用
+function currentBillingCycle() {
+  return formatDate(nowLocal()).slice(0, 7);
+}
 function formatDate(date) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
@@ -153,6 +157,10 @@ async function loadHistory(env) {
   }
   const history = await bucket(env).get(KV_HISTORY, "json");
   return Array.isArray(history) ? history : [];
+}
+// 单条写入（测试与旧调用方用），内部走批量写入
+async function appendTrafficHistory(env, instanceId, name, trafficGb) {
+  await appendTrafficHistoryBatch(env, [{ instanceId, name, trafficGb }]);
 }
 async function appendTrafficHistoryBatch(env, entries) {
   if (!bucket(env)) {
@@ -346,4 +354,4 @@ SECRET_KEYS = [
 ];
 WIZARD_TTL_SECONDS = 900;
 
-export { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, HISTORY_KEEP_DAYS, KV_CONFIG, KV_HISTORY, KV_SESSION, KV_STATE, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, SECRET_KEYS, TIMEZONE_OFFSET_HOURS, WIZARD_TTL_SECONDS, appendTrafficHistoryBatch, bucket, bumpCounter, clearCounter, clearDeviceState, clearLimitWizard, clearWizard, eventAllowed, formatDate, formatMoney, formatTime, getCurrentDevice, getLimitWizard, getNavigation, getWizard, loadConfig, loadHistory, loadSessions, loadState, markEvent, nowLocal, nowSeconds, purgeDeviceState, redact, resetNavigation, sanitize, saveConfig, saveState, setCurrentDevice, setLimitWizard, setNavigation, setWizard };
+export { appendTrafficHistory, currentBillingCycle, DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, HISTORY_KEEP_DAYS, KV_CONFIG, KV_HISTORY, KV_SESSION, KV_STATE, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, SECRET_KEYS, TIMEZONE_OFFSET_HOURS, WIZARD_TTL_SECONDS, appendTrafficHistoryBatch, bucket, bumpCounter, clearCounter, clearDeviceState, clearLimitWizard, clearWizard, eventAllowed, formatDate, formatMoney, formatTime, getCurrentDevice, getLimitWizard, getNavigation, getWizard, loadConfig, loadHistory, loadSessions, loadState, markEvent, nowLocal, nowSeconds, purgeDeviceState, redact, resetNavigation, sanitize, saveConfig, saveState, setCurrentDevice, setLimitWizard, setNavigation, setWizard };

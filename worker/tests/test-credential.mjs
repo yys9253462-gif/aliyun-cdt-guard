@@ -506,7 +506,7 @@ console.log('--- 10. 配置与代码一致性：定时凭据体检有没有被�
     `代码=${codeCron} 配置=${JSON.stringify(crons)} —— 不一致则定时体检永远不触发`);
 
   // 顺带核一下巡检那个值（同一个坑的另一个面）
-  const im = src.match(/isInspection\s*=\s*cron\s*===\s*'[^']*'\s*\|\|\s*cron\s*===\s*'([^']+)'/);
+  const im = src.match(/isInspection\s*=\s*cron\s*===\s*['\"][^'\"]*['\"]\s*\|\|\s*cron\s*===\s*['\"]([^'\"]+)['\"]/);
   const inspCron = im ? im[1] : '';
   check('🔴 巡检的 cron 值在「配置」与「代码」里完全一致',
     Boolean(inspCron) && crons.includes(inspCron),

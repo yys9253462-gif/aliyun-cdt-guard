@@ -35,7 +35,7 @@ function sleep(ms) {
 }
 var scopes, create, legacy;
 scopes = new AsyncLocalStorage();
-create = () => ({ budget: { used: 0 }, balanceCache: /* @__PURE__ */ new Map(), signal: null, actionJournal: null });
+create = () => ({ budget: { used: 0 }, balanceCache: /* @__PURE__ */ new Map(), trafficCache: /* @__PURE__ */ new Map(), signal: null, actionJournal: null });
 legacy = create();
 
 export { create, legacy, operationSignal, requestContext, scopes, sleep, throwIfCancelled, withOperationSignal, withRequestContext };

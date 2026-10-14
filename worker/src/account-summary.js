@@ -45,7 +45,7 @@ function quotaForGroup(members) {
 async function trafficForGroup(ak, sk, members) {
   const region = members?.length ? members[0]?.region || "" : "";
   try {
-    const value = await getCdtTrafficGb(ak, sk, region);
+    const value = await getCdtTrafficGb(ak, sk, String(members?.[0]?.cdt_endpoint || "").trim());
     return { trafficGb: value, error: null };
   } catch (error) {
     return { trafficGb: -1, error };

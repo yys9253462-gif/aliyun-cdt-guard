@@ -45,7 +45,7 @@ const handledMatch = listenerSrc.match(
 );
 const handledBlock = handledMatch ? handledMatch[0] : '';
 const handled = new Set(
-  [...handledBlock.matchAll(/case\s+'([a-z]+)'\s*:/g)].map((m) => m[1])
+  [...handledBlock.matchAll(/case\s+['\"]([a-z]+)['\"]\s*:/g)].map((m) => m[1])
 );
 
 // 'start' 是 Telegram 的默认起始命令，通常作为 menu 的别名，不算独立注册项
@@ -63,11 +63,11 @@ console.log('');
 console.log('--- 2. 提取「已注册到 Telegram 菜单」的命令清单 ---');
 
 const regMatch = telegramSrc.match(
-  /export async function registerCommands[\s\S]*?\n\}/
+  /(?:export )?async function registerCommands[\s\S]*?\n\}/
 );
 const regBlock = regMatch ? regMatch[0] : '';
 const registered = new Set(
-  [...regBlock.matchAll(/command:\s*'([a-z]+)'/g)].map((m) => m[1])
+  [...regBlock.matchAll(/command:\s*['\"]([a-z]+)['\"]/g)].map((m) => m[1])
 );
 
 console.log(`  已注册到菜单: ${[...registered].sort().join(', ')}`);
@@ -98,7 +98,7 @@ console.log('');
 console.log('--- 4. 注册项本身的格式要求 ---');
 
 const cmdEntries = [...regBlock.matchAll(
-  /command:\s*'([a-z]+)',\s*description:\s*'([^']*)'/g
+  /command:\s*['\"]([a-z]+)['\"],\s*description:\s*['\"]([^'\"]*)['\"]/g
 )].map((m) => ({ command: m[1], description: m[2] }));
 
 check('每项都有 command 和 description', cmdEntries.length === registered.size,
@@ -125,7 +125,7 @@ check('命令名无重复', new Set(cmdNames).size === cmdNames.length);
 console.log('');
 console.log('--- 5. 帮助文案要覆盖新增命令 ---');
 
-const helpMatch = listenerSrc.match(/const HELP_TEXT[\s\S]*?`;/);
+const helpMatch = listenerSrc.match(/(?:const|var|let) HELP_TEXT[\s\S]*?`;/);
 const helpText = helpMatch ? helpMatch[0] : '';
 check('使用说明里提到了 /cancel',
   helpText.includes('/cancel'));

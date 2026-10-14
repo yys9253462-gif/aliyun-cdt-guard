@@ -1,4 +1,4 @@
-import { buildSummaryText } from './account-summary.js';
+import { buildSummaryText, groupByAccount, maskAk, quotaForGroup } from './account-summary.js';
 import { getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceDetail, getInstanceStatus, isOverseasRegion } from './aliyun-api.js';
 import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, loadHistory, nowLocal, sanitize } from './common.js';
 import { regionDisplayWithCode } from './region-names.js';
@@ -42,41 +42,59 @@ async function buildStatus(config) {
   lines.push(`时间: ${nowLocal().toISOString().replace("T", " ").slice(0, 16)}`);
   return lines.join("\n");
 }
+// 按账号（AK）分组展示（自 main 123e550 移植）：
+// CDT 返回的是账号级总量，逐台展示会把同一个数字重复算到每台机器上；
+// 同一账号同时有内地与非内地机器时，接口拆不出两个池各自的用量，只能如实说明。
 async function buildTraffic(config) {
   const users = config?.users || [];
   if (!users.length) return "当前没有配置任何机器。";
   const lines = ["流量与免费额度", ""];
-  for (const user of users) {
-    const name = sanitize(user?.name || user?.instance_id);
-    const region = user?.region || "";
-    const limit = Number(user?.traffic_limit ?? 180);
-    if (user?.paused) {
-      lines.push(`\xB7 ${name}`);
-      lines.push("  监控: 已暂停");
+  for (const { ak, members } of groupByAccount(users)) {
+    const sk = String(members[0]?.sk || "").trim();
+    const endpoint = String(members[0]?.cdt_endpoint || "").trim();
+    lines.push(`· 账号 ${maskAk(ak)}（${members.length} 台机器）`);
+    const active = members.filter((u) => !u?.paused);
+    if (!active.length) {
+      lines.push("  全部已暂停，未查询用量。");
+      lines.push("");
       continue;
     }
-    let traffic;
+    let trafficGb;
     try {
-      traffic = await getCdtTrafficGb(user.ak, user.sk, region);
+      trafficGb = await getCdtTrafficGb(ak, sk, endpoint);
     } catch (error) {
-      lines.push(`\xB7 ${name}`);
       lines.push(`  查询失败: ${sanitize(error)}`);
+      lines.push("");
       continue;
     }
-    const freeGb = getFreeQuotaGb(region);
-    const area = isOverseasRegion(region) ? "非中国内地" : "中国内地";
-    const remain = freeGb - traffic;
-    lines.push(`\xB7 ${name}`);
-    lines.push(`  地域: ${regionDisplayWithCode(region)}`);
-    lines.push(`  已用: ${gb(traffic)} GB / 阈值 ${limit.toFixed(0)} GB`);
-    lines.push(`  免费额度: ${freeGb.toFixed(0)} GB（${area}）`);
-    if (remain >= 0) {
-      lines.push(`  额度剩余: ${gb(remain)} GB`);
+    lines.push(`  本月已用: ${gb(trafficGb)} GB（账号级计量：含该账号全部地域与产品）`);
+    const { mainland, overseas } = quotaForGroup(members);
+    if (mainland > 0 && overseas > 0) {
+      lines.push("  ⚠️ 该账号同时含有内地与非内地机器，接口只返回合计用量，");
+      lines.push("     拆不出两个池各自的消耗，分池剩余暂不显示；");
+      lines.push(`     免费额度: 中国内地 ${mainland.toFixed(0)} GB + 非中国内地 ${overseas.toFixed(0)} GB（两池分别累计）`);
+      lines.push("     准确数字请以阿里云控制台「云数据传输」页面为准。");
     } else {
-      lines.push(`  已超出免费额度 ${gb(-remain)} GB，正在产生费用`);
+      const label = overseas > 0 ? "非中国内地额度" : "中国内地额度";
+      const quota = overseas > 0 ? overseas : mainland;
+      const remain = quota - trafficGb;
+      if (remain >= 0) {
+        lines.push(`  ${label}: ${quota.toFixed(0)} GB，已用 ${(trafficGb / quota * 100).toFixed(1)}%，剩 ${gb(remain)} GB`);
+      } else {
+        lines.push(`  ${label}: ${quota.toFixed(0)} GB，已超出 ${gb(-remain)} GB（正在计费）`);
+      }
+    }
+    lines.push("  机器:");
+    for (const user of members) {
+      const name = sanitize(user?.name || user?.instance_id);
+      const limit = Number(user?.traffic_limit ?? 180);
+      const paused = user?.paused ? "（已暂停）" : "";
+      lines.push(`    · ${name} [${regionDisplayWithCode(user?.region || "")}] 阈值 ${limit.toFixed(0)} GB${paused}`);
     }
     lines.push("");
   }
+  lines.push("提示: CDT 用量按小时计费出账，官方口径账单默认 6 小时内完成，");
+  lines.push("      此处的数字通常滞后 1~6 小时，以阿里云控制台账单为准。");
   return lines.join("\n");
 }
 async function buildBalance(config) {
@@ -152,7 +170,7 @@ async function buildBalance(config) {
     }
     let trafficGb = -1;
     try {
-      trafficGb = await getCdtTrafficGb(ak, user?.sk || "", region);
+      trafficGb = await getCdtTrafficGb(ak, user?.sk || "", user?.cdt_endpoint || "");
     } catch (error) {
       trafficGb = -1;
     }
@@ -261,7 +279,7 @@ async function buildReport(config) {
     const sk = String(user.sk || "").trim();
     let trafficGb = -1;
     try {
-      trafficGb = await getCdtTrafficGb(ak, sk, region);
+      trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "");
     } catch (error) {
       trafficGb = -1;
     }

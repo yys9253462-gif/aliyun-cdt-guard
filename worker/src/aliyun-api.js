@@ -124,21 +124,51 @@ function isOverseasRegion(region) {
 function getFreeQuotaGb(region) {
   return isOverseasRegion(region) ? FREE_QUOTA_OVERSEAS_GB : FREE_QUOTA_MAINLAND_GB;
 }
-async function getCdtTrafficGb(accessKeyId, accessKeySecret) {
-  const result = await requestWithRetry({
-    accessKeyId,
-    accessKeySecret,
-    endpoint: CDT_ENDPOINT,
-    action: "ListCdtInternetTraffic",
-    version: CDT_VERSION,
-    params: { PageSize: "50" }
-  });
-  const data = unwrap(result, "查询 CDT 流量");
+// 分页拉全 CDT 明细（自 main 123e550 移植）：
+// 原来写死 PageSize 50 且不翻页，明细超过 50 条会被静默丢弃，总量偏小、「额度剩余」虚高。
+// 单页 100、最多 CDT_MAX_PAGES 页 —— 页数上限同时是子请求预算的闸门。
+async function fetchAllCdtTrafficDetails(accessKeyId, accessKeySecret, endpoint) {
   let totalBytes = 0;
-  for (const item of data.TrafficDetails || []) {
-    totalBytes += Number(item.Traffic || 0);
+  let pages = 0;
+  for (let pageNumber = 1; ; pageNumber += 1) {
+    const result = await requestWithRetry({
+      accessKeyId,
+      accessKeySecret,
+      endpoint,
+      action: "ListCdtInternetTraffic",
+      version: CDT_VERSION,
+      params: { PageSize: String(CDT_PAGE_SIZE), PageNumber: String(pageNumber) }
+    });
+    const data = unwrap(result, "查询 CDT 流量");
+    const details = data.TrafficDetails || [];
+    for (const item of details) {
+      totalBytes += Number(item.Traffic || 0);
+    }
+    pages += 1;
+    if (details.length < CDT_PAGE_SIZE || pages >= CDT_MAX_PAGES) break;
   }
-  return totalBytes / 1024 ** 3;
+  return totalBytes;
+}
+// 请求级缓存：CDT 返回的是账号级总量，同一个 AK+端点一轮只查一次；失败不缓存。
+// 以下三个是测试用的小工具（打包时因生产代码不引用而被删掉，这里补回）
+function clearBalanceCache() {
+  requestContext().balanceCache?.clear();
+}
+function getSubrequestCount() {
+  return requestContext().budget.used;
+}
+function clearTrafficCache() {
+  requestContext().trafficCache?.clear();
+}
+// endpoint 可覆盖：国际站账号在机器配置里填 cdt_endpoint，为空用国内站默认端点。
+async function getCdtTrafficGb(accessKeyId, accessKeySecret, endpoint = "") {
+  const ep = String(endpoint || "").trim() || CDT_ENDPOINT;
+  const cacheKey = `${String(accessKeyId || "")}|${ep}`;
+  const cache = requestContext().trafficCache || (requestContext().trafficCache = new Map());
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const value = await fetchAllCdtTrafficDetails(accessKeyId, accessKeySecret, ep) / 1024 ** 3;
+  cache.set(cacheKey, value);
+  return value;
 }
 async function getInstanceStatus(accessKeyId, accessKeySecret, region, instanceId) {
   const result = await requestWithRetry({
@@ -348,8 +378,10 @@ async function getInstanceBill(accessKeyId, accessKeySecret, region, instanceId,
     return { amount: -1, currency: "" };
   }
 }
-var CDT_ENDPOINT, CDT_VERSION, ECS_VERSION, BSS_VERSION, BSS_ENDPOINTS, FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, OVERSEAS_PREFIXES, RETRY_TIMES, RETRY_DELAY_MS, SUBREQUEST_BUDGET, BudgetExhaustedError, ApiError, balanceCacheByAk;
+var CDT_ENDPOINT, CDT_PAGE_SIZE, CDT_MAX_PAGES, CDT_VERSION, ECS_VERSION, BSS_VERSION, BSS_ENDPOINTS, FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, OVERSEAS_PREFIXES, RETRY_TIMES, RETRY_DELAY_MS, SUBREQUEST_BUDGET, BudgetExhaustedError, ApiError, balanceCacheByAk;
 CDT_ENDPOINT = "cdt.aliyuncs.com";
+CDT_PAGE_SIZE = 100;
+CDT_MAX_PAGES = 10;
 CDT_VERSION = "2021-08-13";
 ECS_VERSION = "2014-05-26";
 BSS_VERSION = "2017-12-14";
@@ -377,4 +409,4 @@ ApiError = class extends Error {
 };
 balanceCacheByAk = () => requestContext().balanceCache;
 
-export { ApiError, BSS_ENDPOINTS, BSS_VERSION, BudgetExhaustedError, CDT_ENDPOINT, CDT_VERSION, ECS_VERSION, FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, OVERSEAS_PREFIXES, RETRY_DELAY_MS, RETRY_TIMES, SUBREQUEST_BUDGET, acquireSubrequest, balanceCacheByAk, currentBillingCycle, describeRegions, doRequest, fetchAccountBalance, getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceDetail, getInstanceStatus, isOverseasRegion, isSubrequestBudgetExhausted, isTransient, listInstances, percentEncode2, requestWithRetry, resetSubrequestCount, startInstance, stopInstance, unwrap };
+export { clearBalanceCache, getSubrequestCount, CDT_MAX_PAGES, CDT_PAGE_SIZE, clearTrafficCache, fetchAllCdtTrafficDetails, ApiError, BSS_ENDPOINTS, BSS_VERSION, BudgetExhaustedError, CDT_ENDPOINT, CDT_VERSION, ECS_VERSION, FREE_QUOTA_MAINLAND_GB, FREE_QUOTA_OVERSEAS_GB, OVERSEAS_PREFIXES, RETRY_DELAY_MS, RETRY_TIMES, SUBREQUEST_BUDGET, acquireSubrequest, balanceCacheByAk, currentBillingCycle, describeRegions, doRequest, fetchAccountBalance, getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceDetail, getInstanceStatus, isOverseasRegion, isSubrequestBudgetExhausted, isTransient, listInstances, percentEncode2, requestWithRetry, resetSubrequestCount, startInstance, stopInstance, unwrap };

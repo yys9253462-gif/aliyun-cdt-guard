@@ -20,7 +20,7 @@ const cases = [
   ['正常查了 3 台', { ok: true, checked: 3 }, (t) => t.includes('检查了 3 台') && !t.includes('object')],
   ['正常查了 1 台', { ok: true, checked: 1 }, (t) => t.includes('检查了 1 台')],
   ['配置里没有机器', { ok: true, checked: 0 }, (t) => t.includes('没有正在监控的机器') && t.includes('添加账号')],
-  ['软锁拦住未跑', { ok: true, skipped: true, checked: 0 }, (t) => t.includes('没有正在监控的机器')],
+  ['软锁拦住未跑', { ok: true, skipped: true, checked: 0 }, (t) => t.includes('已跳过') && !t.includes('巡检完成')],
   ['巡检整体失败', { ok: false, error: 'KV 读取超时' }, (t) => t.includes('没能完成') && t.includes('KV 读取超时')],
   ['失败但没有原因', { ok: false }, (t) => t.includes('没能完成')],
   ['返回 null', null, (t) => typeof t === 'string' && t.length > 0],

@@ -86,16 +86,12 @@ console.log('\n【第四组】🔴 对照：证明「按名字匹配」确实会
   check('截断后两段文字完全相同（这就是祸根）', truncA === truncB,
     `${truncA} vs ${truncB}`);
 
-  // 关键证据：拿「截断后的名字」去查 —— 老实现就是这么干的，
-  // 结果无论你想找 A 还是想找 B，都只会拿到 A。
+  // 老实现拿「截断后的名字」去前缀匹配，想找 B 也会拿到 A（删错机器）。
+  // 现在 findUserByName 只认全名精确匹配：截断名一律查不到，宁可找不到也不串台。
   const foundA = findUserByName(config, truncA);
   const foundB = findUserByName(config, truncB);
-  check('老实现按截断名查，两次都命中同一台（A）',
-    foundA && foundB && foundA.instance_id === foundB.instance_id
-      && foundA.instance_id === ID_A,
+  check('截断名不再前缀匹配到任何机器（不会串台）', !foundA && !foundB,
     `A→${foundA && foundA.instance_id} / B→${foundB && foundB.instance_id}`);
-  check('🔴 因此想选 B 也会被解析成 A —— 这就是「删错机器」',
-    foundB && foundB.instance_id !== ID_B);
 
   // 而按 ID 查就绝对不会错
   check('按 ID 查 B 一定拿得到 B（新实现的做法）',

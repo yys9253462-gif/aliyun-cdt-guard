@@ -411,3 +411,5 @@ function accountTagOf(ak) {
 }
 
 export { DEFAULT_TRAFFIC_LIMIT, MAX_INSTANCES_PER_SCAN, STEP_ASK_AK, STEP_ASK_SK, STEP_CONFIRM, accountTagOf, buildName, confirmAddAccount, handleAddAccountStep, isPlausibleAk, isPlausibleSk, safeScan, startAddAccount };
+// 兼容旧调用方：maskAk 现在住在 account-summary.js
+export { maskAk };

@@ -349,7 +349,7 @@ async function checkOne(env, user, config, state, logger, collector) {
     }
   }
   try {
-    const trafficGb = await getCdtTrafficGb(ak, sk);
+    const trafficGb = await getCdtTrafficGb(ak, sk, user.cdt_endpoint || "");
     const status = await getInstanceStatus(ak, sk, region, instanceId);
     if (status === null) {
       logger(`[${name}] 未找到实例 ${instanceId}，请检查实例编号与地域是否匹配`);

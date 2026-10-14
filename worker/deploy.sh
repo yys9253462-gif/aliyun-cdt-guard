@@ -381,6 +381,21 @@ do_deploy() {
     return 1
   fi
 
+  # ⚠️ 第二道守卫（别删）：线上数据主存储在 Durable Object「GuardCoordinator」里。
+  #    用一份没有这个绑定的旧代码部署，Cloudflare 会把 DO 连同里面的配置和状态一起删掉。
+  #    所以绑定或类缺了任何一个，一律拒绝部署。
+  if ! grep -qE '^\s*class_name\s*=\s*"GuardCoordinator"' wrangler.toml \
+     || ! grep -qE '^\s*name\s*=\s*"CDT_COORDINATOR"' wrangler.toml \
+     || ! grep -qs 'class GuardCoordinator' src/coordinator.js; then
+    err "这份代码缺少 Durable Object「GuardCoordinator」，已拒绝部署。"
+    printf "\n"
+    printf "   原因：线上的配置和状态存放在这个 Durable Object 里，\n"
+    printf "         用缺少它的代码部署会把线上数据一起删掉。\n\n"
+    printf "   怎么办：确认你在最新的代码目录里（wrangler.toml 有 CDT_COORDINATOR 绑定，\n"
+    printf "         且 src/coordinator.js 存在），再重新部署。\n\n"
+    return 1
+  fi
+
   local output=""
   local code=0
   output="$(wrun deploy 2>&1)" || code=$?

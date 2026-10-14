@@ -48,6 +48,10 @@ var REGION_CN = {
   "cn-shenzhen-finance-1": "深圳金融云",
   "cn-beijing-finance-1": "北京金融云"
 };
+function isKnownRegion(region) {
+  const code = String(region || "").trim().toLowerCase();
+  return Boolean(code) && Object.prototype.hasOwnProperty.call(REGION_CN, code);
+}
 function regionDisplayName(region) {
   const code = String(region || "").trim();
   if (!code) return "未知地域";
@@ -60,4 +64,4 @@ function regionDisplayWithCode(region) {
   return cn ? `${cn}（${code}）` : code;
 }
 
-export { REGION_CN, regionDisplayName, regionDisplayWithCode };
+export { isKnownRegion, REGION_CN, regionDisplayName, regionDisplayWithCode };
