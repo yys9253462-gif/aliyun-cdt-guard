@@ -236,6 +236,18 @@ async function enforceStop(user, config, state, name, key, trafficGb, status, li
         markEvent(state, key, "overlimit");
       }
     }
+  } else if (status === "Starting" || status === "Pending") {
+    // 中间态（正在启动 / 创建中）：原来会被当成「已停止」跳过，机器起来后要等下一轮才关。
+    // 现在直接下发关机；阿里云不接受时（状态不对）不告警，下一轮（5 分钟后）再关。
+    logger(`[${name}] 流量超标，实例处于中间态 ${status}，尝试关机`);
+    try {
+      await stopInstance(user.ak, user.sk, user.region, user.instance_id);
+      logger(`[${name}] 中间态关机指令已下发`);
+    } catch (error) {
+      logger(`[${name}] 中间态暂不能关机（${redact(error.message)}），下一轮重试`);
+    }
+  } else if (status === "Stopping") {
+    logger(`[${name}] 流量超标，实例正在停止中`);
   } else {
     logger(`[${name}] 流量超标，实例已处于停止状态`);
     if (eventAllowed(state, key, "overlimit", OVERLIMIT_COOLDOWN)) {
@@ -246,6 +258,28 @@ async function enforceStop(user, config, state, name, key, trafficGb, status, li
         markEvent(state, key, "overlimit");
       }
     }
+  }
+}
+// 暂停监控的机器不会被自动关机。如果流量已经超过阈值，每天提醒一次，
+// 免得「暂停后忘了恢复」一直在花钱。只查流量（同账号有缓存），查不到就静默跳过。
+async function remindPausedOverLimit(user, config, state, name, key, logger) {
+  const { limitGb } = parseTrafficLimit(user.traffic_limit);
+  const eventKey = `${key}:paused_over`;
+  if (!eventAllowed(state, eventKey, "paused_over", OVERLIMIT_COOLDOWN)) return;
+  let trafficGb;
+  try {
+    trafficGb = await getCdtTrafficGb(user.ak, user.sk, user.cdt_endpoint || "");
+  } catch (error) {
+    throwIfCancelled();
+    return;
+  }
+  if (!(trafficGb >= limitGb)) return;
+  const msg = `机器: ${sanitize(name)}
+当前流量: ${trafficGb.toFixed(2)}GB (阈值 ${limitGb.toFixed(0)}GB)
+这台机器的监控处于「暂停」状态，所以不会被自动关机。
+如果不是有意为之，请在「单机操作」里点「▶️ 恢复监控」。`;
+  if (await sendAlert(config, "已暂停的机器流量超标", msg, "warn", logger)) {
+    markEvent(state, eventKey, "paused_over");
   }
 }
 async function handleCheckFailure(state, config, name, key, error, logger) {
@@ -326,6 +360,7 @@ async function checkOne(env, user, config, state, logger, collector) {
   }
   if (user.paused) {
     logger(`[${name}] 监控已暂停，跳过`);
+    await remindPausedOverLimit(user, config, state, name, key, logger);
     return;
   }
   const { ak, sk, region } = user;
@@ -399,6 +434,42 @@ async function checkWithTimeout(env, user, config, state, logger, collector) {
     clearTimeout(timer);
   }
 }
+// 整轮巡检失败（读不到配置/状态、存储写入失败等）时，所有机器的止损都停了。
+// 原来只写日志，没人知道。现在连续失败 INSPECTION_FAIL_ALERT_THRESHOLD 轮就推送告警，
+// 之后每小时最多一条；恢复后清零。计数单独存一个键，不依赖可能已经读不出来的 state。
+async function reportInspectionFailure(env, error, logger) {
+  try {
+    const kv = env && env.CDT_GUARD_KV;
+    if (!kv) return;
+    const health = await kv.get(INSPECTION_HEALTH_KEY, "json") || {};
+    health.failures = Number(health.failures || 0) + 1;
+    // 先记下失败次数：如果下面读配置也失败（存储坏了），计数至少不会丢
+    await kv.put(INSPECTION_HEALTH_KEY, JSON.stringify(health));
+    const now = nowSeconds();
+    if (health.failures >= INSPECTION_FAIL_ALERT_THRESHOLD && now - Number(health.last_alert || 0) >= NOTIFY_COOLDOWN) {
+      const config = await loadConfig(env);
+      Object.defineProperty(config, "__env", { value: env, enumerable: false, configurable: true });
+      const msg = `已连续 ${health.failures} 轮巡检整体失败，所有机器的流量监控与自动止损都已停止。
+最近错误: ${sanitize(error && error.message || "未知")}
+请到 Cloudflare 仪表盘查看 cdt-guard 的实时日志。`;
+      if (await sendAlert(config, "巡检整体失败（止损已停止）", msg, "danger", logger)) {
+        health.last_alert = now;
+        await kv.put(INSPECTION_HEALTH_KEY, JSON.stringify(health));
+      }
+    }
+  } catch (e) {
+    logger(`巡检失败告警本身也失败了: ${redact(e && e.message)}`);
+  }
+}
+async function clearInspectionHealth(env) {
+  try {
+    const kv = env && env.CDT_GUARD_KV;
+    if (!kv) return;
+    const health = await kv.get(INSPECTION_HEALTH_KEY, "json");
+    if (health && Number(health.failures || 0) > 0) await kv.delete(INSPECTION_HEALTH_KEY);
+  } catch (_) {
+  }
+}
 async function runInspection(env, options = {}) {
   const logger = makeLogger("巡检");
   const lockKey = MANUAL_INSPECTION_LOCK;
@@ -439,14 +510,16 @@ async function runInspection(env, options = {}) {
     state.inspection_cursor = (cursor + checked) % users.length;
     await saveState(env, state);
     await appendTrafficHistoryBatch(env, collector);
+    await clearInspectionHealth(env);
     logger(`巡检结束（已检查 ${checked}/${users.length} 台）`);
     return { ok: true, checked, partial: budgetHit || timedOut, total: users.length };
   } catch (error) {
     logger(`巡检整体失败: ${redact(error && error.message)}`);
+    await reportInspectionFailure(env, error, logger);
     return { ok: false, error: String(error && error.message) };
   }
 }
-var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW;
+var MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, USER_CHECK_TIMEOUT_MS, START_WAIT_TIMEOUT_MS, START_POLL_INTERVAL_MS, MANUAL_INSPECTION_LOCK, INSPECTION_LOCK_WINDOW, INSPECTION_HEALTH_KEY, INSPECTION_FAIL_ALERT_THRESHOLD;
 MAX_START_FAILURES = 3;
 RESOURCE_RETRY_COOLDOWN = 1800;
 CHECK_FAILURE_ALERT_THRESHOLD = 3;
@@ -456,5 +529,7 @@ START_WAIT_TIMEOUT_MS = 9e4;
 START_POLL_INTERVAL_MS = 8e3;
 MANUAL_INSPECTION_LOCK = "manual_inspection_lock";
 INSPECTION_LOCK_WINDOW = 180;
+INSPECTION_HEALTH_KEY = "inspection_health";
+INSPECTION_FAIL_ALERT_THRESHOLD = 3;
 
-export { CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
+export { INSPECTION_FAIL_ALERT_THRESHOLD, INSPECTION_HEALTH_KEY, clearInspectionHealth, remindPausedOverLimit, reportInspectionFailure, CHECK_FAILURE_ALERT_THRESHOLD, CREDENTIAL_ALERT_COOLDOWN, INSPECTION_LOCK_WINDOW, MANUAL_INSPECTION_LOCK, MAX_START_FAILURES, RESOURCE_RETRY_COOLDOWN, START_POLL_INTERVAL_MS, START_WAIT_TIMEOUT_MS, USER_CHECK_TIMEOUT_MS, checkMoney, checkOne, checkQuotaProgress, checkWithTimeout, enforceStop, handleCheckFailure, makeLogger, parseTrafficLimit, runInspection, trackStatusChange, tryStart };
