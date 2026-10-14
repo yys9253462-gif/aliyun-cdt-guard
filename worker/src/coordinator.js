@@ -23,6 +23,31 @@ var GuardCoordinator = class {
         if (raw === void 0) {
           raw = kv ? await kv.get(key) : null;
           if (raw !== null) await storage.put(`data:${key}`, raw);
+        } else if (key === "config" && kv) {
+          // 电脑上的脚本（configure.sh / deploy.sh）是直接读写 KV 里的 config 的。
+          // 原来这里只认协调器自己的那份，脚本改的配置线上不生效，之后还会被覆盖掉。
+          // 现在 KV 里的版本号更高、或版本号相同但内容不同（脚本改了没升版本号）时，以 KV 为准。
+          // 机器人改配置时版本号会 +1，所以 KV 镜像写失败留下的旧内容版本号更低，不会被误采用。
+          try {
+            const kvRaw = await kv.get(key);
+            if (kvRaw && kvRaw !== raw) {
+              const rev = (text) => {
+                try {
+                  return Number(JSON.parse(text)._revision || 0);
+                } catch (_) {
+                  return NaN;
+                }
+              };
+              const kvRev = rev(kvRaw), doRev = rev(raw);
+              if (Number.isFinite(kvRev) && (kvRev > doRev || kvRev === doRev || !Number.isFinite(doRev))) {
+                console.log(`[同步] 采用 KV 里的配置（脚本改过，版本 ${kvRev}，原 ${doRev}）`);
+                raw = kvRaw;
+                await storage.put(`data:${key}`, raw);
+              }
+            }
+          } catch (e) {
+            console.log("[同步] 读取 KV 配置失败，继续用协调器里的配置:", redact(e));
+          }
         }
         return type === "json" ? raw ? JSON.parse(raw) : null : raw;
       },
