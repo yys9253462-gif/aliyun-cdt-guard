@@ -256,6 +256,24 @@ async function setWizard(env, chatId, wizard) {
   });
   await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
 }
+// 添加账号做到一半放弃时，向导里暂存的 AccessKey Secret 原来要等下次进入向导才会清掉。
+// 巡检每轮顺手清掉过期的向导记录（只有真的有过期记录时才写一次存储）。
+async function purgeExpiredWizards(env) {
+  if (!bucket(env)) return 0;
+  const sessions = await loadSessions(env);
+  let purged = 0;
+  for (const key of Object.keys(sessions)) {
+    const record = sessions[key];
+    const wizard = record && record.wizard;
+    if (wizard && typeof wizard === "object" && nowSeconds() - Number(wizard.at || 0) > WIZARD_TTL_SECONDS) {
+      delete record.wizard;
+      if (!Object.keys(record).length) delete sessions[key];
+      purged += 1;
+    }
+  }
+  if (purged) await bucket(env).put(KV_SESSION, JSON.stringify(sessions));
+  return purged;
+}
 async function clearWizard(env, chatId) {
   if (!bucket(env)) {
     return;
@@ -354,4 +372,4 @@ SECRET_KEYS = [
 ];
 WIZARD_TTL_SECONDS = 900;
 
-export { appendTrafficHistory, currentBillingCycle, DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, HISTORY_KEEP_DAYS, KV_CONFIG, KV_HISTORY, KV_SESSION, KV_STATE, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, SECRET_KEYS, TIMEZONE_OFFSET_HOURS, WIZARD_TTL_SECONDS, appendTrafficHistoryBatch, bucket, bumpCounter, clearCounter, clearDeviceState, clearLimitWizard, clearWizard, eventAllowed, formatDate, formatMoney, formatTime, getCurrentDevice, getLimitWizard, getNavigation, getWizard, loadConfig, loadHistory, loadSessions, loadState, markEvent, nowLocal, nowSeconds, purgeDeviceState, redact, resetNavigation, sanitize, saveConfig, saveState, setCurrentDevice, setLimitWizard, setNavigation, setWizard };
+export { purgeExpiredWizards, appendTrafficHistory, currentBillingCycle, DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, HISTORY_KEEP_DAYS, KV_CONFIG, KV_HISTORY, KV_SESSION, KV_STATE, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, SECRET_KEYS, TIMEZONE_OFFSET_HOURS, WIZARD_TTL_SECONDS, appendTrafficHistoryBatch, bucket, bumpCounter, clearCounter, clearDeviceState, clearLimitWizard, clearWizard, eventAllowed, formatDate, formatMoney, formatTime, getCurrentDevice, getLimitWizard, getNavigation, getWizard, loadConfig, loadHistory, loadSessions, loadState, markEvent, nowLocal, nowSeconds, purgeDeviceState, redact, resetNavigation, sanitize, saveConfig, saveState, setCurrentDevice, setLimitWizard, setNavigation, setWizard };

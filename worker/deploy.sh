@@ -338,10 +338,14 @@ do_set_secrets() {
   printf "   作用是让别人猜不到你的机器人入口。随便一串字母数字就行。\n"
   local suggested
   suggested="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' || echo '')"
-  [ -z "$suggested" ] && suggested="cdtguard$RANDOM$RANDOM"
+  [ -z "$suggested" ] && suggested="cdtguard$(printf %05d%05d%05d%05d%05d%05d $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM)"
   printf "   我帮你生成了一串，可以直接回车用它：${CYAN}%s${RESET}\n" "$suggested"
-  read -r -p "   网址密钥： " webhook_secret
-  [ -z "$webhook_secret" ] && webhook_secret="$suggested"
+  while :; do
+    read -r -p "   网址密钥： " webhook_secret
+    [ -z "$webhook_secret" ] && webhook_secret="$suggested"
+    is_strong_secret "$webhook_secret" && break
+    err "网址密钥至少 24 位，只能用字母、数字、下划线和短横线。直接回车可用我生成的那串。"
+  done
   if printf "%s" "$webhook_secret" | wrun secret put WEBHOOK_SECRET >/dev/null 2>&1; then
     ok "网址密钥已写入。"
     printf "   请记下它（自检要用）：${BOLD}%s${RESET}\n" "$webhook_secret"
@@ -479,7 +483,9 @@ do_selfcheck() {
   local url="${worker_url}/setup"
   local body=""
   local http_code=""
-  body="$(curl -s --max-time 25 -H "X-CDT-Key: ${secret}" -w '\n__HTTP_CODE__%{http_code}' "$url" 2>/dev/null || true)"
+  # 必须用 POST：线上代码只在 POST 时才向 Telegram 注册 Webhook 和命令菜单。
+  # 原来用 GET，首次安装或重设网址密钥后 Telegram 仍指向旧地址，机器人就收不到消息了。
+  body="$(curl -s --max-time 25 -X POST -H "X-CDT-Key: ${secret}" -w '\n__HTTP_CODE__%{http_code}' "$url" 2>/dev/null || true)"
 
   # 从响应末尾把状态码抠出来
   http_code="$(printf '%s' "$body" | sed -n 's/.*__HTTP_CODE__\([0-9]\{3\}\)$/\1/p' || true)"
@@ -688,6 +694,12 @@ run_selfcheck_only() {
   do_selfcheck
 }
 
+# 网址密钥同时保护机器人入口和自检接口，必须够长、够随机。
+# 只允许字母、数字、下划线、短横线（它会出现在 Telegram 的网址里），至少 24 位。
+is_strong_secret() {
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9_-]{24,128}$'
+}
+
 # ---- 只重设网址密钥 ----
 run_reset_webhook_secret() {
   printf "网址密钥的作用：让别人猜不到你的机器人入口。\n"
@@ -695,10 +707,14 @@ run_reset_webhook_secret() {
 
   local suggested=""
   suggested="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' || echo '')"
-  [ -z "$suggested" ] && suggested="cdtguard$RANDOM$RANDOM"
+  [ -z "$suggested" ] && suggested="cdtguard$(printf %05d%05d%05d%05d%05d%05d $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM)"
   printf "我帮你生成了一串，直接回车用它：${CYAN}%s${RESET}\n" "$suggested"
-  read -r -p "新网址密钥： " new_secret
-  [ -z "$new_secret" ] && new_secret="$suggested"
+  while :; do
+    read -r -p "新网址密钥： " new_secret
+    [ -z "$new_secret" ] && new_secret="$suggested"
+    is_strong_secret "$new_secret" && break
+    err "网址密钥至少 24 位，只能用字母、数字、下划线和短横线。直接回车可用我生成的那串。"
+  done
 
   if printf "%s" "$new_secret" | wrun secret put WEBHOOK_SECRET >/dev/null 2>&1; then
     ok "新密钥已写入。"

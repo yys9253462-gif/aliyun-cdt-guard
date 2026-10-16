@@ -201,10 +201,15 @@
 1. 打开阿里云控制台 → 右上角头像 → **访问控制 RAM** → 用户 → 创建用户
 2. 勾选「使用永久 AccessKey 访问」
 3. 创建完成后**立刻复制** AccessKey ID 和 Secret（只显示一次）
-4. 给这个子账号授予以下权限：
-   - `AliyunECSFullAccess`（开关机）
-   - `AliyunCDTReadOnlyAccess`（查流量）
-   - `AliyunBSSReadOnlyAccess`（查账单与余额）
+4. 给这个子账号授予以下权限（够用即可，越少越安全）：
+   - **自定义策略**（只能查实例、开机、关机，不能创建 / 删除机器）：
+     在 RAM → 权限策略 → 创建权限策略 → 脚本编辑，粘贴
+     [`docs/ram-policy-ecs-minimal.json`](docs/ram-policy-ecs-minimal.json) 的内容
+   - `AliyunCDTReadOnlyAccess`（查流量，只读）
+   - `AliyunBSSReadOnlyAccess`（查账单与余额，只读）
+
+   ⚠️ 不要给 `AliyunECSFullAccess`，也不要用主账号的 AccessKey：
+   这两种密钥一旦泄露，对方可以开新机器、删机器、改安全组，费用都记在你账上。
 
 ### 第 2 步：准备通知渠道
 

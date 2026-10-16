@@ -150,7 +150,9 @@ bash menu.sh status        # 只看当前状态
 >
 > 万一删除失败（Telegram 只允许删 48 小时内的消息），机器人会提醒你**手动删掉**。
 >
-> 建议给每个账号建一个 RAM 子账号，只放开机 / 关机 / 查询权限，别用主账号的密钥。
+> 给每个账号建一个 RAM 子账号，权限见仓库根目录 README「第 1 步」：自定义策略
+> [`docs/ram-policy-ecs-minimal.json`](../docs/ram-policy-ecs-minimal.json)（只能查实例、开机、关机）
+> + `AliyunCDTReadOnlyAccess` + `AliyunBSSReadOnlyAccess`。**不要用主账号的密钥。**
 
 ### 方式二：在电脑上跑脚本
 

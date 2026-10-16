@@ -78,20 +78,8 @@ var GuardCoordinator = class {
   }
   async dispatch(request) {
     const url = new URL(request.url), env = this.adaptedEnv();
-    const key = request.headers.get("X-CDT-Key") || "";
-    if (url.pathname === "/control/config") {
-      if (!env.WEBHOOK_SECRET || key !== env.WEBHOOK_SECRET) return new Response("密钥不正确", { status: 403 });
-      if (request.method === "GET") return Response.json(await loadConfig(env));
-      if (request.method !== "PUT") return new Response("仅允许GET/PUT", { status: 405 });
-      const next = await request.json();
-      if (!next || !Array.isArray(next.users) || !next.telegram?.chat_id) return new Response("配置结构无效", { status: 400 });
-      const previous = await loadConfig(env);
-      const version = String(previous._revision || "0");
-      if ((request.headers.get("If-Match") || "") !== version) return new Response("配置已被其他操作更新，请重新读取后再试", { status: 409 });
-      next._revision = String(Number(version) + 1);
-      await env.CDT_GUARD_KV.put("config", JSON.stringify(next));
-      return Response.json({ ok: true, revision: next._revision });
-    }
+    // 原来这里有 /control/config：带对网址密钥就能读出（GET）或整份替换（PUT）全部配置，
+    // 包括所有 AccessKey Secret，且不限制尝试次数。没有任何脚本用它，已移除。
     if (url.pathname === "/internal/cron") {
       if (url.hostname !== "internal.invalid" || !env.WEBHOOK_SECRET || request.headers.get("X-CDT-Internal") !== env.WEBHOOK_SECRET) return new Response("未找到", { status: 404 });
       const event = await request.json();

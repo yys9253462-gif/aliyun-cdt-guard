@@ -190,8 +190,10 @@ console.log('--- 4. 健康检查与无关路径不进 Durable Object ---');
   check('以上都没进 Durable Object', doCalls === 0, `doCalls=${doCalls}`);
   await worker.fetch(new Request('https://x/webhook/s', { method: 'POST', body: '{}' }), env, {});
   await worker.fetch(new Request('https://x/setup?key=s'), env, {});
-  await worker.fetch(new Request('https://x/control/config'), env, {});
-  check('Webhook / setup / control 仍然进 Durable Object', doCalls === 3, `doCalls=${doCalls}`);
+  check('Webhook / setup 仍然进 Durable Object', doCalls === 2, `doCalls=${doCalls}`);
+  const r3 = await worker.fetch(new Request('https://x/control/config', { headers: { 'X-CDT-Key': 's' } }), env, {});
+  check('读写配置的 /control/config 已移除：带对密钥也是 404，且不进 Durable Object', r3.status === 404 && doCalls === 2,
+    `status=${r3.status} doCalls=${doCalls}`);
 }
 
 console.log('--- 5. 余额 / 账单每小时最多查一次 ---');

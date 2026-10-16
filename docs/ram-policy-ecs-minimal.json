@@ -1,0 +1,15 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeInstances",
+        "ecs:DescribeRegions",
+        "ecs:StartInstance",
+        "ecs:StopInstance"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { getAccountBalance, getCdtTrafficGb, getFreeQuotaGb, getInstanceBill, getInstanceStatus, isOverseasRegion, isSubrequestBudgetExhausted, resetSubrequestCount, startInstance, stopInstance } from './aliyun-api.js';
-import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, appendTrafficHistoryBatch, bumpCounter, clearCounter, eventAllowed, formatMoney, formatDate, loadConfig, loadState, markEvent, nowLocal, nowSeconds, redact, sanitize, saveState } from './common.js';
+import { DEFAULT_BALANCE_LIMIT, DEFAULT_BILL_LIMIT, MONEY_COOLDOWN, NOTIFY_COOLDOWN, OVERLIMIT_COOLDOWN, QUOTA_COOLDOWN, QUOTA_WARN_LEVELS, appendTrafficHistoryBatch, bumpCounter, clearCounter, eventAllowed, formatMoney, formatDate, loadConfig, loadState, markEvent, purgeExpiredWizards, nowLocal, nowSeconds, redact, sanitize, saveState } from './common.js';
 import { ERR_CREDENTIAL, classifyError } from './credential-error.js';
 import { sleep, throwIfCancelled, withOperationSignal } from './request-context.js';
 import { sendAlert } from './telegram.js';
@@ -618,6 +618,11 @@ async function runInspection(env, options = {}) {
     if (!options.force && heldSince && now - heldSince < INSPECTION_LOCK_WINDOW) {
       logger(`距上次巡检仅 ${now - heldSince} 秒（< ${INSPECTION_LOCK_WINDOW} 秒），本次跳过以免状态冲突`);
       return { ok: true, skipped: true, checked: 0 };
+    }
+    try {
+      const purged = await purgeExpiredWizards(env);
+      if (purged) logger(`已清理 ${purged} 条过期的添加账号记录（含暂存的密钥）`);
+    } catch (_) {
     }
     if (!users.length) {
       logger("配置里没有机器，什么都不做");
