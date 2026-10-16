@@ -20,6 +20,10 @@ def build(destination):
         if path.suffix == '.bat':
             raw = raw.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
         entries['cdt-guard-worker/' + rel] = raw
+    # 部署指南里引用的 RAM 最小权限策略在仓库根目录 docs/ 下，一并放进包里
+    policy = ROOT.parent / 'docs' / 'ram-policy-ecs-minimal.json'
+    if policy.is_file():
+        entries['cdt-guard-worker/docs/ram-policy-ecs-minimal.json'] = policy.read_bytes()
     destination = Path(destination).resolve()
     destination.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED) as z:

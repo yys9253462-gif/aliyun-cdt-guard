@@ -107,15 +107,21 @@ console.log('--- 4. 打码 ---');
 
 console.log('--- 5. 文档 ---');
 {
-  const root = new URL('../../', import.meta.url);
-  const readme = fs.readFileSync(new URL('README.md', root), 'utf8');
-  const policy = JSON.parse(fs.readFileSync(new URL('docs/ram-policy-ecs-minimal.json', root), 'utf8'));
+  // 在仓库里：策略在 ../docs/、权限说明看根目录 README；
+  // 在分享包里：策略在包内 docs/、权限说明看包内的部署指南
+  const workerRoot = new URL('../', import.meta.url);
+  const repoRoot = new URL('../../', import.meta.url);
+  const inRepo = fs.existsSync(new URL('docs/ram-policy-ecs-minimal.json', repoRoot));
+  const policyUrl = inRepo ? new URL('docs/ram-policy-ecs-minimal.json', repoRoot) : new URL('docs/ram-policy-ecs-minimal.json', workerRoot);
+  const guideUrl = inRepo ? new URL('README.md', repoRoot) : new URL('部署指南.md', workerRoot);
+  const guide = fs.readFileSync(guideUrl, 'utf8');
+  const policy = JSON.parse(fs.readFileSync(policyUrl, 'utf8'));
   const actions = policy.Statement.flatMap((s) => s.Action).sort();
   check('最小权限策略只含查实例 / 查地域 / 开机 / 关机',
     JSON.stringify(actions) === JSON.stringify(['ecs:DescribeInstances', 'ecs:DescribeRegions', 'ecs:StartInstance', 'ecs:StopInstance']),
     JSON.stringify(actions));
-  check('README 不再推荐授予 AliyunECSFullAccess', !/授予[\s\S]{0,80}`AliyunECSFullAccess`（开关机）/.test(readme)
-    && readme.includes('不要给 `AliyunECSFullAccess`'));
+  check('权限说明不再推荐授予 AliyunECSFullAccess', !/授予[\s\S]{0,80}`AliyunECSFullAccess`（开关机）/.test(guide)
+    && guide.includes('不要给 `AliyunECSFullAccess`'));
   const used = new Set();
   for (const f of fs.readdirSync(new URL('../src/', import.meta.url))) {
     if (!f.endsWith('.js')) continue;
